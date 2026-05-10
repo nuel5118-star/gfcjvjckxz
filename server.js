@@ -185,7 +185,8 @@ app.post('/api/campaigns/:id/launch',async(req,res)=>{
     const hourStart=firstStep.send_hour_start||campaign.send_hour_start||9;
     const hourEnd=firstStep.send_hour_end||campaign.send_hour_end||17;
     let sendTime=getScheduledTime(now,0,hourStart,hourEnd,campaign.skip_weekends);
-    if(isBefore(sendTime,now))sendTime=addDays(sendTime,1);
+    // If calculated time is in the past, send in next scheduler tick (5 mins) not tomorrow
+    if(isBefore(sendTime,now))sendTime=addMinutes(now,5);
     const randomDelay=Math.floor(Math.random()*(campaign.random_delay_max||30));
     sendTime=addMinutes(sendTime,randomDelay);
     await supabase.from('contacts').update({assigned_inbox:inbox.email,current_step:1,next_send_at:sendTime.toISOString(),status:'active'}).eq('id',contact.id);
@@ -362,6 +363,39 @@ async function runScheduler(){
 }
 
 cron.schedule('*/5 * * * *', runScheduler);
+
+// ── CONTACT CHECK ENDPOINT (for n8n reply verification) ─────────────────────
+app.get('/api/contacts/check',async(req,res)=>{
+  const email=req.query.email?.trim().toLowerCase();
+  if(!email)return res.status(400).json({found:false,error:'email param required'});
+  const{data,error}=await supabase
+    .from('contacts')
+    .select('id,email,first_name,last_name,company,city,phone,status,current_step,campaign_id,assigned_inbox,enrolled_at')
+    .eq('email',email)
+    .limit(1);
+  if(error||!data||data.length===0)return res.json({found:false});
+  const contact=data[0];
+  // Get campaign name
+  const{data:camp}=await supabase.from('campaigns').select('name,status').eq('id',contact.campaign_id).single();
+  res.json({
+    found:true,
+    contact:{
+      id:contact.id,
+      email:contact.email,
+      first_name:contact.first_name,
+      last_name:contact.last_name,
+      company:contact.company,
+      city:contact.city,
+      phone:contact.phone,
+      status:contact.status,
+      current_step:contact.current_step,
+      assigned_inbox:contact.assigned_inbox,
+      enrolled_at:contact.enrolled_at,
+      campaign_name:camp?.name||'Unknown',
+      campaign_status:camp?.status||'unknown'
+    }
+  });
+});
 
 app.use(express.static(path.join(__dirname,'dist')));
 app.get('*',(req,res)=>{if(req.path.startsWith('/api')||req.path.startsWith('/track'))return res.status(404).json({error:'Not found'});res.sendFile(path.join(__dirname,'dist/index.html'));});
