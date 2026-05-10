@@ -253,10 +253,10 @@ export default function CampaignDetail() {
                           {c.current_step > 0 ? `Step ${c.current_step}` : 'Not started'}
                         </td>
                         <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                          {c.next_send_at ? new Date(c.next_send_at).toLocaleDateString() : '—'}
+                          {c.next_send_at ? new Date(c.next_send_at).toLocaleString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '—'}
                         </td>
                         <td style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace' }}>
-                          {c.assigned_inbox?.split('@')[1] || '—'}
+                          {c.assigned_inbox || '—'}
                         </td>
                         <td>
                           <div style={{ display: 'flex', gap: 4 }}>
