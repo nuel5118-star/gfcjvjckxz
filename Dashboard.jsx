@@ -2,14 +2,20 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from './api.js';
 
+async function getSchedulerStatus() {
+  const res = await fetch('/api/scheduler/status');
+  return res.ok ? res.json() : null;
+}
+
 export default function Dashboard() {
   const [campaigns, setCampaigns] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [scheduler, setScheduler] = useState(null);
 
   useEffect(() => {
-    Promise.all([api.getCampaigns(), api.getAnalytics({ date: 'today' })])
-      .then(([c, a]) => { setCampaigns(c || []); setAnalytics(a); })
+    Promise.all([api.getCampaigns(), api.getAnalytics({ date: 'today' }), getSchedulerStatus()])
+      .then(([c, a, s]) => { setCampaigns(c || []); setAnalytics(a); setScheduler(s); })
       .finally(() => setLoading(false));
   }, []);
 
@@ -39,6 +45,25 @@ export default function Dashboard() {
             </div>
           ))}
         </div>
+        {/* Scheduler status banner */}
+        {scheduler && (
+          <div style={{ background: scheduler.webhook_configured ? 'var(--success-bg)' : 'var(--danger-bg)', border: `1px solid ${scheduler.webhook_configured ? 'var(--success-border)' : 'var(--danger-border)'}`, borderRadius: 10, padding: '12px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: scheduler.webhook_configured ? 'var(--success)' : 'var(--danger)' }}>
+                {scheduler.webhook_configured ? '✅ Scheduler Active' : '⚠️ Webhook not configured'}
+              </span>
+              {scheduler.webhook_configured && (
+                <>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Sent today: <strong>{scheduler.sent_today}/{scheduler.daily_cap}</strong></span>
+                  {scheduler.pending_now > 0 && <span style={{ fontSize: 12, color: 'var(--warning)', fontWeight: 600 }}>⚡ {scheduler.pending_now} overdue sends</span>}
+                  {scheduler.scheduled_today > 0 && <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{scheduler.scheduled_today} scheduled today</span>}
+                </>
+              )}
+            </div>
+            <Link to="/queue" style={{ fontSize: 12, color: 'var(--info)', textDecoration: 'none', fontWeight: 500 }}>View Queue →</Link>
+          </div>
+        )}
+
         <div className="card">
           <div className="card-header">
             <span className="card-title">Recent Campaigns</span>
