@@ -83,20 +83,20 @@ export default function QueuePage() {
     try {
       const [s, q, r] = await Promise.all([
         req('GET', '/scheduler/status'),
-        req('GET', '/scheduler/queue'),
-        req('GET', '/scheduler/recent'),
+        req('GET', '/scheduler/queue?pageSize=2000'),
+        req('GET', '/scheduler/recent?pageSize=1000'),
       ]);
       setStatus(s);
-      setQueue(q);
-      setRecent(r);
+      setQueue(q.contacts || []);
+      setRecent(r.sends || []);
       setLastRefresh(new Date());
     } catch (e) { console.error('Failed to load queue:', e); }
   };
 
   const loadLogs = async () => {
     try {
-      const l = await req('GET', `/scheduler/logs?type=${logFilter}&limit=200`);
-      setLogs(l);
+      const data = await req('GET', `/scheduler/logs?type=${logFilter}&pageSize=500`);
+      setLogs(data.logs || []);
     } catch (e) { console.error('Failed to load logs:', e); }
   };
 
@@ -172,8 +172,7 @@ export default function QueuePage() {
 
   const handleClearLogs = async () => {
     if (!confirm(`Clear all ${logFilter === 'all' ? '' : logFilter + ' '}logs? This cannot be undone.`)) return;
-    try { await req('DELETE', `/scheduler/logs${logFilter !== 'all' ? `?type=${logFilter}` : ''}`); await loadLogs(); }
-    catch (e) { alert(e.message); }
+    try { await req('DELETE', `/scheduler/logs${logFilter !== 'all' ? `?type=${logFilter}` : ''}`); await loadLogs(); }    catch (e) { alert(e.message); }
   };
 
   const failed = recent.filter(r => r.status === 'failed');
