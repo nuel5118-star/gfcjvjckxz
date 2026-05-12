@@ -114,7 +114,42 @@ function getScheduledTime(baseDate,delayDays,hourStart,hourEnd,skipWeekends,time
 // TRACKING
 app.get('/track/open',async(req,res)=>{const{email,subject,inbox,campaign}=req.query;await supabase.from('email_events').insert({type:'open',recipient:email,subject:decodeURIComponent(subject||''),inbox,campaign,created_at:new Date().toISOString()});res.set('Content-Type','image/gif');res.set('Cache-Control','no-store');res.send(PIXEL);});
 app.get('/track/click',async(req,res)=>{const{email,subject,inbox,campaign,url}=req.query;await supabase.from('email_events').insert({type:'click',recipient:email,subject:decodeURIComponent(subject||''),inbox,campaign,clicked_url:url,created_at:new Date().toISOString()});res.redirect(decodeURIComponent(url));});
-app.post('/track/reply',async(req,res)=>{const{sender_email,sender_name,recipient_inbox,subject,latest_reply,date}=req.body;await supabase.from('email_events').insert({type:'reply',recipient:sender_email,sender_name,inbox:recipient_inbox,subject,reply_body:latest_reply,created_at:date||new Date().toISOString()});const email=normalizeEmail(sender_email||'');if(email){if(detectUnsubscribe(latest_reply)){await addToBlacklist(email,'unsubscribed');}else if(!detectAutoReply(subject,latest_reply)){await supabase.from('contacts').update({status:'replied',finished_at:new Date().toISOString(),next_send_at:null}).eq('email',email);}}res.json({ok:true});});
+app.post('/track/reply',async(req,res)=>{
+  const{sender_email,sender_name,recipient_inbox,subject,latest_reply,date}=req.body;
+  const email=normalizeEmail(sender_email||'');
+
+  // Look up campaign name so reply shows in analytics
+  let campaignName=null;
+  if(email){
+    const{data:contact}=await supabase
+      .from('contacts')
+      .select('campaign_id,campaigns!inner(name)')
+      .eq('email',email)
+      .limit(1)
+      .single();
+    if(contact?.campaigns?.name) campaignName=contact.campaigns.name;
+  }
+
+  await supabase.from('email_events').insert({
+    type:'reply',
+    recipient:sender_email,
+    sender_name,
+    inbox:recipient_inbox,
+    subject,
+    reply_body:latest_reply,
+    campaign:campaignName,
+    created_at:date||new Date().toISOString()
+  });
+
+  if(email){
+    if(detectUnsubscribe(latest_reply)){
+      await addToBlacklist(email,'unsubscribed');
+    } else if(!detectAutoReply(subject,latest_reply)){
+      await supabase.from('contacts').update({status:'replied',finished_at:new Date().toISOString(),next_send_at:null}).eq('email',email);
+    }
+  }
+  res.json({ok:true});
+});
 app.post('/track/send',async(req,res)=>{const{email,subject,inbox,campaign}=req.body;await supabase.from('email_events').insert({type:'send',recipient:email,subject,inbox,campaign,created_at:new Date().toISOString()});res.json({ok:true});});
 
 // CSV PARSE
