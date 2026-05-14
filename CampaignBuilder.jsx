@@ -76,7 +76,6 @@ function VarInserter({ onInsert }) {
               onChange={e => setPopup(p => ({ ...p, fallback: e.target.value }))}
               onKeyDown={e => { if (e.key === 'Enter') handleInsert(); if (e.key === 'Escape') setPopup(null); }}
               autoFocus
-              onKeyDown={e => { if (e.key === 'Escape') setPopup(null); }}
             />
           </div>
           <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:12, background:'var(--bg-subtle)', padding:'6px 10px', borderRadius:6 }}>
@@ -127,12 +126,10 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
     if (!campaignId) return;
     try {
       const res = await api.getContacts(campaignId, { page: 1 });
-      console.log('Loaded contacts:', res.contacts?.length, res);
       setRealContacts(res.contacts || []);
     } catch(e) { console.error('Failed to load contacts:', e); }
   };
 
-  // Load real contacts on mount if we have a campaignId
   useEffect(() => { if (campaignId) loadRealContacts(); }, [campaignId]);
 
   const handleRealContactSelect = (e) => {
@@ -180,8 +177,6 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
       {/* Variable pills with fallback editor */}
       <VarInserter onInsert={insertVar} />
 
-
-
       <div className="form-group">
         <label className="label" style={{ display:'flex', alignItems:'center', gap:6 }}>
           Subject Line
@@ -195,11 +190,7 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
           Email Body
           {activeField === 'body' && <span style={{ fontSize:10, background:'var(--accent)', color:'white', padding:'1px 6px', borderRadius:10 }}>← inserting here</span>}
         </label>
-        <textarea ref={bodyRef} className="input" style={{ minHeight:160 }} placeholder={`Hi {{first_name | "there"}},
-
-I came across {{company | "your company"}} and wanted to reach out...
-
-Best,`} value={step.body} onChange={e => onChange({ ...step, body: e.target.value })} onFocus={() => setActiveField('body')} />
+        <textarea ref={bodyRef} className="input" style={{ minHeight:160 }} placeholder={`Hi {{first_name | "there"}},\n\nI came across {{company | "your company"}} and wanted to reach out...\n\nBest,`} value={step.body} onChange={e => onChange({ ...step, body: e.target.value })} onFocus={() => setActiveField('body')} />
       </div>
 
       {/* Delay (not for first step) */}
@@ -305,6 +296,8 @@ export default function CampaignBuilder() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(isEdit);
+  // NEW: holds the reschedule result to show a confirmation banner before navigating
+  const [rescheduleInfo, setRescheduleInfo] = useState(null); // { rescheduled_contacts, send_window_updated }
 
   useEffect(() => {
     if (!isEdit) return;
@@ -322,7 +315,10 @@ export default function CampaignBuilder() {
       setStopOnAutoReply(c.stop_on_auto_reply || false);
       setRandomDelayMax(c.random_delay_max || 30);
       const sorted = (c.campaign_steps || []).sort((a, b) => a.step_number - b.step_number);
-      setSteps(sorted.length > 0 ? sorted.map(s => ({ subject:s.subject, body:s.body, delay_days:s.delay_days, send_hour_start:s.send_hour_start||null, send_hour_end:s.send_hour_end||null })) : [{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null }]);
+      setSteps(sorted.length > 0
+        ? sorted.map(s => ({ subject:s.subject, body:s.body, delay_days:s.delay_days, send_hour_start:s.send_hour_start||null, send_hour_end:s.send_hour_end||null }))
+        : [{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null }]
+      );
     }).finally(() => setLoading(false));
   }, [id]);
 
@@ -332,12 +328,54 @@ export default function CampaignBuilder() {
       if (!steps[i].subject.trim()) { setError(`Email ${i+1} needs a subject line`); return; }
       if (!steps[i].body.trim()) { setError(`Email ${i+1} needs a body`); return; }
     }
-    setError(''); setSaving(true);
+    setError('');
+    setSaving(true);
+    setRescheduleInfo(null);
+
     try {
-      const payload = { name, steps, daily_cap:dailyCap, per_inbox_cap:perInboxCap, max_new_leads_per_day:maxNewLeads, send_hour_start:hourStart, send_hour_end:hourEnd, skip_weekends:skipWeekends, timezone, start_date:startDate||null, end_date:endDate||null, stop_on_auto_reply:stopOnAutoReply, random_delay_max:randomDelayMax };
-      if (isEdit) { await api.updateCampaign(id, payload); navigate(`/campaigns/${id}`); }
-      else { const c = await api.createCampaign(payload); navigate(`/campaigns/${c.id}`); }
-    } catch(e) { setError(e.message); } finally { setSaving(false); }
+      const payload = {
+        name, steps,
+        daily_cap: dailyCap,
+        per_inbox_cap: perInboxCap,
+        max_new_leads_per_day: maxNewLeads,
+        send_hour_start: hourStart,
+        send_hour_end: hourEnd,
+        skip_weekends: skipWeekends,
+        timezone,
+        start_date: startDate || null,
+        end_date: endDate || null,
+        stop_on_auto_reply: stopOnAutoReply,
+        random_delay_max: randomDelayMax,
+      };
+
+      if (isEdit) {
+        // updateCampaign returns the full response including rescheduled_contacts
+        const result = await api.updateCampaign(id, payload);
+
+        // NEW: Check if the send window changed and show a confirmation before navigating.
+        // This is critical UX — without it the user sees no feedback and assumes it broke.
+        if (result?.send_window_updated) {
+          setRescheduleInfo({
+            rescheduled_contacts: result.rescheduled_contacts ?? 0,
+            send_window_updated: true,
+          });
+          // Navigate after a short delay so the user can read the banner.
+          // If they changed the window and 0 contacts were affected that's still
+          // useful to know (e.g. all contacts already sent or paused).
+          setTimeout(() => navigate(`/campaigns/${id}`), 3000);
+        } else {
+          // No send-window change — navigate immediately as before.
+          navigate(`/campaigns/${id}`);
+        }
+      } else {
+        const c = await api.createCampaign(payload);
+        navigate(`/campaigns/${c.id}`);
+      }
+    } catch(e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (loading) return <div style={{ padding:32, color:'var(--text-muted)' }}>Loading...</div>;
@@ -359,6 +397,37 @@ export default function CampaignBuilder() {
 
       <div className="page fade-in" style={{ maxWidth:780 }}>
         {error && <div className="alert alert-error">{error}</div>}
+
+        {/* NEW: Reschedule confirmation banner — shown after save when send window changed */}
+        {rescheduleInfo && (
+          <div className="alert" style={{
+            background: 'var(--success-bg, #d1fae5)',
+            border: '1px solid var(--success-border, #6ee7b7)',
+            color: 'var(--success-text, #065f46)',
+            borderRadius: 8,
+            padding: '12px 16px',
+            marginBottom: 16,
+            fontSize: 13,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+          }}>
+            <span style={{ fontSize:18 }}>✅</span>
+            <div>
+              {rescheduleInfo.rescheduled_contacts > 0 ? (
+                <>
+                  <strong>Campaign saved.</strong> Send window changed —{' '}
+                  <strong>{rescheduleInfo.rescheduled_contacts} contact{rescheduleInfo.rescheduled_contacts !== 1 ? 's' : ''}</strong>{' '}
+                  rescheduled to the new time window. Redirecting…
+                </>
+              ) : (
+                <>
+                  <strong>Campaign saved.</strong> Send window updated — no contacts were in the future queue to reschedule. Redirecting…
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Campaign name */}
         <div className="card" style={{ marginBottom:16 }}>
