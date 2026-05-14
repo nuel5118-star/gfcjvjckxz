@@ -275,28 +275,79 @@ app.post('/api/campaigns',async(req,res)=>{
   res.json(campaign);
 });
 
-// FIX: PUT now reschedules queued contacts when send hours change
+// FIX: PUT now correctly reschedules queued contacts when send hours change.
+// Three bugs fixed vs the original:
+//   1. select('*') only — campaign_steps from DB were stale (delete/reinsert hadn't run yet)
+//   2. use `steps` from req.body for rescheduling, not campaign.campaign_steps (which had old hours)
+//   3. parseInt() on both sides of send_hour comparison — prevents false triggers from type mismatch
 app.put('/api/campaigns/:id',async(req,res)=>{
   const{name,steps,status,daily_cap,per_inbox_cap,max_new_leads_per_day,send_hour_start,send_hour_end,skip_weekends,timezone,start_date,end_date,stop_on_auto_reply,random_delay_max}=req.body;
+
+  // Fetch old campaign for comparison — we still need campaign_steps here so we can
+  // detect per-step hour changes (stepHoursChanged check below)
   const{data:oldCampaign}=await supabase.from('campaigns').select('send_hour_start,send_hour_end,timezone,skip_weekends,campaign_steps(*)').eq('id',req.params.id).single();
-  const{data:campaign,error}=await supabase.from('campaigns').update({name,status,daily_cap,per_inbox_cap,max_new_leads_per_day,send_hour_start,send_hour_end,skip_weekends,timezone,start_date,end_date,stop_on_auto_reply,random_delay_max,updated_at:new Date().toISOString()}).eq('id',req.params.id).select('*,campaign_steps(*)').single();
+
+  // FIX 1: select('*') only on the update — we don't need campaign_steps from DB.
+  // The delete/reinsert below runs after this query, so fetching steps here always
+  // returned the OLD values. We use `steps` from req.body instead (see FIX 2).
+  const{data:campaign,error}=await supabase.from('campaigns').update({name,status,daily_cap,per_inbox_cap,max_new_leads_per_day,send_hour_start,send_hour_end,skip_weekends,timezone,start_date,end_date,stop_on_auto_reply,random_delay_max,updated_at:new Date().toISOString()}).eq('id',req.params.id).select('*').single();
   if(error)return res.status(500).json({error:error.message});
-  if(steps){await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id);await supabase.from('campaign_steps').insert(steps.map((s,i)=>({campaign_id:req.params.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:s.send_hour_start||null,send_hour_end:s.send_hour_end||null})));}
-  const sendWindowChanged=(send_hour_start!==undefined&&send_hour_start!==oldCampaign?.send_hour_start)||(send_hour_end!==undefined&&send_hour_end!==oldCampaign?.send_hour_end)||(timezone!==undefined&&timezone!==oldCampaign?.timezone)||(skip_weekends!==undefined&&skip_weekends!==oldCampaign?.skip_weekends);
-  const stepHoursChanged=steps&&oldCampaign?.campaign_steps&&steps.some((s,i)=>{const old=oldCampaign.campaign_steps.find(o=>o.step_number===i+1);return old&&(s.send_hour_start!==old.send_hour_start||s.send_hour_end!==old.send_hour_end);});
+
+  if(steps){
+    await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id);
+    await supabase.from('campaign_steps').insert(steps.map((s,i)=>({campaign_id:req.params.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:s.send_hour_start||null,send_hour_end:s.send_hour_end||null})));
+  }
+
+  // FIX 3: parseInt() on both sides — without this, `9 !== "9"` is true (type coercion),
+  // which caused a false reschedule trigger on every single save even with no hour change.
+  const sendWindowChanged=(
+    (send_hour_start!==undefined && parseInt(send_hour_start)!==parseInt(oldCampaign?.send_hour_start))||
+    (send_hour_end!==undefined   && parseInt(send_hour_end)  !==parseInt(oldCampaign?.send_hour_end))  ||
+    (timezone!==undefined        && timezone!==oldCampaign?.timezone)                                  ||
+    (skip_weekends!==undefined   && skip_weekends!==oldCampaign?.skip_weekends)
+  );
+
+  const stepHoursChanged=steps&&oldCampaign?.campaign_steps&&steps.some((s,i)=>{
+    const old=oldCampaign.campaign_steps.find(o=>o.step_number===i+1);
+    return old&&(s.send_hour_start!==old.send_hour_start||s.send_hour_end!==old.send_hour_end);
+  });
+
   let rescheduled=0;
   if(sendWindowChanged||stepHoursChanged){
-    const now=new Date();const tz=timezone||campaign.timezone||'America/New_York';const newSteps=campaign.campaign_steps||[];
-    const{data:contacts}=await supabase.from('contacts').select('id,current_step,next_send_at').eq('campaign_id',req.params.id).eq('status','active').gt('current_step',0).gt('next_send_at',now.toISOString());
+    const now=new Date();
+    const tz=timezone||campaign.timezone||'America/New_York';
+    const sw=skip_weekends!==undefined?skip_weekends:campaign.skip_weekends;
+
+    // FIX 2: use `steps` from req.body — these are the NEW hours the user just saved.
+    // The original code used campaign.campaign_steps which always had the OLD values
+    // because the delete/reinsert above hadn't been reflected in the earlier DB query.
+    const newSteps=steps||[];
+
+    const{data:contacts}=await supabase
+      .from('contacts')
+      .select('id,current_step,next_send_at')
+      .eq('campaign_id',req.params.id)
+      .eq('status','active')
+      .gt('current_step',0)
+      .gt('next_send_at',now.toISOString());
+
     for(const contact of contacts||[]){
-      const stepDef=newSteps.find(s=>s.step_number===contact.current_step);
-      const hs=stepDef?.send_hour_start||send_hour_start||9;const he=stepDef?.send_hour_end||send_hour_end||17;
-      let newSendTime=getScheduledTime(new Date(contact.next_send_at),0,hs,he,skip_weekends!==undefined?skip_weekends:campaign.skip_weekends,tz);
-      if(newSendTime<=now)newSendTime=getScheduledTime(now,1,hs,he,skip_weekends!==undefined?skip_weekends:campaign.skip_weekends,tz);
+      // Per-step hours take priority over campaign-level hours.
+      // newSteps is 0-indexed array; contact.current_step is 1-based step number.
+      const stepDef=newSteps[contact.current_step-1];
+      const hs=stepDef?.send_hour_start||send_hour_start||9;
+      const he=stepDef?.send_hour_end  ||send_hour_end  ||17;
+
+      let newSendTime=getScheduledTime(new Date(contact.next_send_at),0,hs,he,sw,tz);
+      // If recalculated time is in the past (e.g. window moved to earlier today and that
+      // window has already passed), push to the next business day.
+      if(newSendTime<=now) newSendTime=getScheduledTime(now,1,hs,he,sw,tz);
+
       await supabase.from('contacts').update({next_send_at:newSendTime.toISOString()}).eq('id',contact.id);
       rescheduled++;
     }
   }
+
   res.json({...campaign,rescheduled_contacts:rescheduled,send_window_updated:!!(sendWindowChanged||stepHoursChanged)});
 });
 
