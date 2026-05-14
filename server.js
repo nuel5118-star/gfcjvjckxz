@@ -9,6 +9,7 @@ import axios from 'axios';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocket } from 'ws';
+import { randomUUID } from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -19,6 +20,10 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://tcqfhdevbmizeenqreoc.s
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, { realtime: { transport: WebSocket } });
 const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7','base64');
+
+// Base URL for tracking pixel and click redirect URLs embedded into emails
+// Set APP_URL in Railway environment variables — must be your public Railway domain
+const APP_URL = (process.env.APP_URL || 'https://gfcjvjckxz-production.up.railway.app').replace(/\/$/,'');
 
 // SSE: connected browser clients that receive real-time log pushes
 const sseClients = new Set();
@@ -111,9 +116,78 @@ function getScheduledTime(baseDate,delayDays,hourStart,hourEnd,skipWeekends,time
   return fromZonedTime(`${dateStr}T${timeStr}`,timezone);
 }
 
+// Injects tracking pixel + wraps all links with click tracking directly into email body
+// Called by the scheduler BEFORE sending to n8n — so n8n gets a fully built email
+// and doesn't need to do any HTML manipulation at all
+function injectTracking(body, params){
+  const{email,inbox,campaign_id,campaign_name,contact_id,step,send_id,subject}=params;
+  const base=APP_URL;
+
+  // Build pixel URL with all enriched params
+  const pixelQ=new URLSearchParams({
+    email,inbox,
+    campaign_id:campaign_id||'',
+    campaign:campaign_name||'',
+    contact_id:contact_id||'',
+    step:String(step||1),
+    send_id:send_id||'',
+    subject:subject||''
+  }).toString();
+  const pixel=`<img src="${base}/track/open?${pixelQ}" width="1" height="1" style="display:none;border:0;outline:none;" alt="" />`;
+
+  // Wrap every <a href="..."> link with click tracking redirect
+  // Skips mailto:, tel:, and links already pointing to our own domain
+  let tracked=body.replace(/<a(\s[^>]*?)href=["']([^"'#][^"']*)["']([^>]*?)>/gi,(match,before,url,after)=>{
+    if(url.startsWith('mailto:')||url.startsWith('tel:')||url.includes(base)){
+      return match;
+    }
+    const clickQ=new URLSearchParams({
+      url,email,inbox,
+      campaign_id:campaign_id||'',
+      contact_id:contact_id||'',
+      step:String(step||1),
+      send_id:send_id||''
+    }).toString();
+    return `<a${before}href="${base}/track/click?${clickQ}"${after}>`;
+  });
+
+  // Append pixel — before </body> if it exists, otherwise at the very end
+  if(tracked.toLowerCase().includes('</body>')){
+    tracked=tracked.replace(/<\/body>/i,`${pixel}</body>`);
+  }else{
+    tracked=tracked+pixel;
+  }
+  return tracked;
+}
+
 // TRACKING
-app.get('/track/open',async(req,res)=>{const{email,subject,inbox,campaign}=req.query;await supabase.from('email_events').insert({type:'open',recipient:email,subject:decodeURIComponent(subject||''),inbox,campaign,created_at:new Date().toISOString()});res.set('Content-Type','image/gif');res.set('Cache-Control','no-store');res.send(PIXEL);});
-app.get('/track/click',async(req,res)=>{const{email,subject,inbox,campaign,url}=req.query;await supabase.from('email_events').insert({type:'click',recipient:email,subject:decodeURIComponent(subject||''),inbox,campaign,clicked_url:url,created_at:new Date().toISOString()});res.redirect(decodeURIComponent(url));});
+app.get('/track/open',async(req,res)=>{
+  const{email,inbox,campaign_id,campaign,contact_id,step,send_id,subject}=req.query;
+  await supabase.from('email_events').insert({
+    type:'open',recipient:email,inbox,
+    campaign:campaign||null,campaign_id:campaign_id||null,
+    contact_id:contact_id||null,step_number:step?parseInt(step):null,
+    send_id:send_id||null,subject:subject?decodeURIComponent(subject):'',
+    created_at:new Date().toISOString()
+  });
+  res.set('Content-Type','image/gif');
+  res.set('Cache-Control','no-store, no-cache, must-revalidate');
+  res.set('Pragma','no-cache');
+  res.send(PIXEL);
+});
+
+app.get('/track/click',async(req,res)=>{
+  const{url,email,inbox,campaign_id,contact_id,step,send_id}=req.query;
+  if(!url)return res.status(400).send('Missing url');
+  await supabase.from('email_events').insert({
+    type:'click',recipient:email,inbox,
+    campaign_id:campaign_id||null,contact_id:contact_id||null,
+    step_number:step?parseInt(step):null,send_id:send_id||null,
+    clicked_url:decodeURIComponent(url),
+    created_at:new Date().toISOString()
+  });
+  res.redirect(decodeURIComponent(url));
+});
 
 // FIX: /track/reply now handles bounces + stores auto-replies as 'auto_reply' type (not 'reply')
 // Previously auto-replies were stored as 'reply' which caused the scheduler to stop sequences
@@ -504,6 +578,12 @@ async function runScheduler(manual=false){
         break;
       }
       await logSchedulerActivity('info',`Batch ${Math.floor(batchOffset/SCHEDULER_BATCH_SIZE)+1}: ${batch.length} contacts`,{},runId);
+
+      // Collect all valid emails for this DB batch into one array
+      // After the loop we fire ONE webhook call — 1 n8n execution for the whole batch
+      const emailBatch=[];
+      const batchMeta=[];
+
       for(const contact of batch){
         if(totalSentThisRun>=(dailyCap-totalToday))break;
         const campaign=campaignMap[contact.campaign_id];
@@ -525,31 +605,110 @@ async function runScheduler(manual=false){
         const stepIndex=steps.findIndex(s=>s.step_number===contact.current_step);
         const step=steps[stepIndex];
         if(!step){await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);result.skipped++;result.skip_reasons.sequence_complete=(result.skip_reasons.sequence_complete||0)+1;await logSchedulerActivity('info',`${contact.email} completed sequence`,{},runId);continue;}
+
         const customFields=contact.custom_fields||{};
         const subject=applyVariables(processSpintax(step.subject),contact,customFields);
-        const body=applyVariables(processSpintax(step.body),contact,customFields);
+        const rawBody=applyVariables(processSpintax(step.body),contact,customFields);
+        const sendId=randomUUID();
         const tz=campaign.timezone||'America/New_York';
-        await logSchedulerActivity('info',`Attempting send for ${contact.email} via ${inbox} (step ${contact.current_step})`,{email:contact.email,inbox,campaign:campaign.name,step:contact.current_step,subject},runId);
+
+        // Inject tracking pixel + click wrapping directly into body
+        // n8n receives a fully built email — no HTML manipulation needed on n8n side
+        const trackedBody=injectTracking(rawBody,{
+          email:contact.email,inbox,
+          campaign_id:campaign.id,campaign_name:campaign.name,
+          contact_id:contact.id,step:contact.current_step,
+          send_id:sendId,subject
+        });
+
+        // Pre-advance contact to next step now so DB is consistent even if webhook call hangs
+        const nextStep=steps[stepIndex+1];
+        if(nextStep){
+          const shs=nextStep.send_hour_start||campaign.send_hour_start||9;
+          const she=nextStep.send_hour_end||campaign.send_hour_end||17;
+          let nextSend=getScheduledTime(now,nextStep.delay_days,shs,she,campaign.skip_weekends,tz);
+          nextSend=addMinutes(nextSend,Math.floor(Math.random()*(campaign.random_delay_max||30)));
+          await supabase.from('contacts').update({current_step:nextStep.step_number,next_send_at:nextSend.toISOString()}).eq('id',contact.id);
+        }else{
+          await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);
+        }
+
+        inboxCounts[inbox]=(inboxCounts[inbox]||0)+1;
+        totalSentThisRun++;
+        if(contact.current_step===1)newLeadsCache[campaign.id]=(newLeadsCache[campaign.id]||0)+1;
+
+        emailBatch.push({
+          to:contact.email,subject,body:trackedBody,inbox,
+          campaign_id:campaign.id,campaign_name:campaign.name,
+          contact_id:contact.id,step:contact.current_step,send_id:sendId,
+          first_name:contact.first_name,last_name:contact.last_name,company:contact.company
+        });
+
+        batchMeta.push({
+          sendId,campaign_id:campaign.id,contact_id:contact.id,
+          email:contact.email,inbox,step_number:contact.current_step,
+          subject,body:rawBody,campaign_name:campaign.name
+        });
+      }
+
+      // ── SINGLE WEBHOOK CALL for the entire DB batch ──────────────────────────
+      // One n8n execution handles all emails in this batch
+      if(emailBatch.length>0){
+        await logSchedulerActivity('info',`Firing webhook with batch of ${emailBatch.length} emails — 1 n8n execution`,{count:emailBatch.length,webhook:settings.webhook_url.slice(0,60)},runId);
         try{
-          const webhookPayload={to:contact.email,subject,body,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:contact.current_step,first_name:contact.first_name,last_name:contact.last_name,company:contact.company};
-          const webhookResponse=await axios.post(settings.webhook_url,webhookPayload,{timeout:15000});
-          await supabase.from('email_events').insert({type:'send',recipient:contact.email,subject,inbox,campaign:campaign.name,created_at:new Date().toISOString()});
-          await supabase.from('sequence_sends').insert({campaign_id:campaign.id,contact_id:contact.id,email:contact.email,inbox,step_number:contact.current_step,subject,body,sent_at:new Date().toISOString(),status:'sent'});
-          const nextStep=steps[stepIndex+1];
-          if(nextStep){
-            const shs=nextStep.send_hour_start||campaign.send_hour_start||9;const she=nextStep.send_hour_end||campaign.send_hour_end||17;
-            let nextSend=getScheduledTime(now,nextStep.delay_days,shs,she,campaign.skip_weekends,tz);
-            nextSend=addMinutes(nextSend,Math.floor(Math.random()*(campaign.random_delay_max||30)));
-            await supabase.from('contacts').update({current_step:nextStep.step_number,next_send_at:nextSend.toISOString()}).eq('id',contact.id);
-          }else{await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);}
-          inboxCounts[inbox]=(inboxCounts[inbox]||0)+1;totalSentThisRun++;result.sent++;
-          if(contact.current_step===1)newLeadsCache[campaign.id]=(newLeadsCache[campaign.id]||0)+1;
-          await logSchedulerActivity('send',`✓ Sent to ${contact.email} via ${inbox} (step ${contact.current_step})`,{email:contact.email,inbox,step:contact.current_step,campaign:campaign.name,subject,webhook_status:webhookResponse.status},runId);
+          await axios.post(settings.webhook_url,{batch:emailBatch},{timeout:60000});
+
+          // Bulk insert sequence_sends for the whole batch — one DB round-trip
+          await supabase.from('sequence_sends').insert(
+            batchMeta.map(m=>({
+              id:m.sendId,
+              campaign_id:m.campaign_id,contact_id:m.contact_id,
+              email:m.email,inbox:m.inbox,step_number:m.step_number,
+              subject:m.subject,body:m.body,
+              sent_at:new Date().toISOString(),status:'sent'
+            }))
+          );
+
+          // Bulk insert send events
+          await supabase.from('email_events').insert(
+            batchMeta.map(m=>({
+              type:'send',recipient:m.email,inbox:m.inbox,
+              campaign:m.campaign_name,campaign_id:m.campaign_id,
+              contact_id:m.contact_id,step_number:m.step_number,send_id:m.sendId,
+              subject:m.subject,created_at:new Date().toISOString()
+            }))
+          );
+
+          result.sent+=emailBatch.length;
+          await logSchedulerActivity('send',`✓ Batch sent: ${emailBatch.length} emails dispatched to n8n`,{
+            count:emailBatch.length,
+            emails:emailBatch.map(e=>e.to),
+            steps:[...new Set(emailBatch.map(e=>e.step))]
+          },runId);
+
         }catch(webhookErr){
-          result.errors++;
-          const errMsg=webhookErr.response?`HTTP ${webhookErr.response.status} — ${JSON.stringify(webhookErr.response.data)}`:webhookErr.message;
-          await logSchedulerActivity('error',`✗ Webhook FAILED for ${contact.email}: ${errMsg}`,{email:contact.email,inbox,campaign:campaign.name,step:contact.current_step,subject,error:errMsg,webhook_url:settings.webhook_url,response_status:webhookErr.response?.status,response_body:JSON.stringify(webhookErr.response?.data||'').slice(0,300)},runId);
-          await supabase.from('sequence_sends').insert({campaign_id:campaign.id,contact_id:contact.id,email:contact.email,inbox,step_number:contact.current_step,subject,body,sent_at:new Date().toISOString(),status:'failed',error_message:errMsg});
+          const errMsg=webhookErr.response
+            ?`HTTP ${webhookErr.response.status} — ${JSON.stringify(webhookErr.response.data)}`
+            :webhookErr.message;
+
+          // Bulk insert failed records
+          await supabase.from('sequence_sends').insert(
+            batchMeta.map(m=>({
+              id:m.sendId,
+              campaign_id:m.campaign_id,contact_id:m.contact_id,
+              email:m.email,inbox:m.inbox,step_number:m.step_number,
+              subject:m.subject,body:m.body,
+              sent_at:new Date().toISOString(),status:'failed',error_message:errMsg
+            }))
+          );
+
+          result.errors+=emailBatch.length;
+          result.sent-=emailBatch.length; // reverse the count since they failed
+          await logSchedulerActivity('error',`✗ Batch webhook FAILED — ${emailBatch.length} emails not sent: ${errMsg}`,{
+            error:errMsg,count:emailBatch.length,
+            webhook_url:settings.webhook_url,
+            response_status:webhookErr.response?.status
+          },runId);
         }
       }
       batchOffset+=SCHEDULER_BATCH_SIZE;
