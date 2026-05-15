@@ -317,30 +317,34 @@ app.put('/api/campaigns/:id',async(req,res)=>{
     const now=new Date();
     const tz=timezone||campaign.timezone||'America/New_York';
     const sw=skip_weekends!==undefined?skip_weekends:campaign.skip_weekends;
-
-    // FIX 2: use `steps` from req.body — these are the NEW hours the user just saved.
-    // The original code used campaign.campaign_steps which always had the OLD values
-    // because the delete/reinsert above hadn't been reflected in the earlier DB query.
     const newSteps=steps||[];
 
+    // NO next_send_at > now filter — reschedule every active contact on any step.
+    // Covers overdue contacts (paused yesterday, editing today), future-scheduled,
+    // everything. New time is always calculated forward into the correct window.
     const{data:contacts}=await supabase
       .from('contacts')
       .select('id,current_step,next_send_at')
       .eq('campaign_id',req.params.id)
       .eq('status','active')
-      .gt('current_step',0)
-      .gt('next_send_at',now.toISOString());
+      .gt('current_step',0);
 
     for(const contact of contacts||[]){
       // Per-step hours take priority over campaign-level hours.
-      // newSteps is 0-indexed array; contact.current_step is 1-based step number.
+      // newSteps is 0-indexed; contact.current_step is 1-based.
       const stepDef=newSteps[contact.current_step-1];
       const hs=stepDef?.send_hour_start||send_hour_start||9;
-      const he=stepDef?.send_hour_end  ||send_hour_end  ||17;
+      const he=stepDef?.send_hour_end||send_hour_end||17;
 
-      let newSendTime=getScheduledTime(new Date(contact.next_send_at),0,hs,he,sw,tz);
-      // If recalculated time is in the past (e.g. window moved to earlier today and that
-      // window has already passed), push to the next business day.
+      // If contact has a future next_send_at, keep that date but move the time
+      // into the new window. If they are overdue or null, use today as the base.
+      const baseDate=contact.next_send_at&&new Date(contact.next_send_at)>now
+        ? new Date(contact.next_send_at)
+        : now;
+
+      let newSendTime=getScheduledTime(baseDate,0,hs,he,sw,tz);
+      // If calculated time is still in the past (window already closed for today),
+      // push to next business day within the correct window.
       if(newSendTime<=now) newSendTime=getScheduledTime(now,1,hs,he,sw,tz);
 
       await supabase.from('contacts').update({next_send_at:newSendTime.toISOString()}).eq('id',contact.id);
