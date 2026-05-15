@@ -357,7 +357,49 @@ app.put('/api/campaigns/:id',async(req,res)=>{
 
 app.delete('/api/campaigns/:id',async(req,res)=>{await supabase.from('contacts').delete().eq('campaign_id',req.params.id);await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id);await supabase.from('campaigns').delete().eq('id',req.params.id);res.json({ok:true});});
 app.post('/api/campaigns/:id/pause',async(req,res)=>{await supabase.from('campaigns').update({status:'paused',updated_at:new Date().toISOString()}).eq('id',req.params.id);res.json({ok:true});});
-app.post('/api/campaigns/:id/resume',async(req,res)=>{await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);res.json({ok:true});});
+app.post('/api/campaigns/:id/resume',async(req,res)=>{
+  // Flip campaign to active
+  await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);
+
+  // Fetch campaign + steps so we can use the correct send window
+  const{data:campaign}=await supabase.from('campaigns').select('*,campaign_steps(*)').eq('id',req.params.id).single();
+  if(!campaign)return res.json({ok:true,requeued:0});
+
+  const now=new Date();
+  const tz=campaign.timezone||'America/New_York';
+  const sw=campaign.skip_weekends!==false;
+
+  // Find all active contacts that are mid-sequence but have no next_send_at —
+  // these are paused/rolled-back contacts that need re-queuing.
+  // Also pick up any contact whose next_send_at is null regardless of how it got that way.
+  const{data:contacts}=await supabase
+    .from('contacts')
+    .select('id,current_step,next_send_at')
+    .eq('campaign_id',req.params.id)
+    .eq('status','active')
+    .gt('current_step',0)
+    .is('next_send_at',null);
+
+  let requeued=0;
+  const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+
+  for(const contact of contacts||[]){
+    // Use per-step hours if defined, fall back to campaign-level hours
+    const stepDef=steps.find(s=>s.step_number===contact.current_step);
+    const hs=stepDef?.send_hour_start||campaign.send_hour_start||9;
+    const he=stepDef?.send_hour_end||campaign.send_hour_end||17;
+
+    // Schedule within today's window — if window already passed, push to next business day
+    let sendTime=getScheduledTime(now,0,hs,he,sw,tz);
+    if(sendTime<=now) sendTime=getScheduledTime(now,1,hs,he,sw,tz);
+
+    await supabase.from('contacts').update({next_send_at:sendTime.toISOString()}).eq('id',contact.id);
+    requeued++;
+  }
+
+  await logSchedulerActivity('info',`Campaign resumed — ${requeued} contacts re-queued with fresh send times`,{campaign_id:req.params.id,requeued});
+  res.json({ok:true,requeued});
+});
 
 app.post('/api/campaigns/:id/launch',async(req,res)=>{
   const{data:campaign}=await supabase.from('campaigns').select('*, campaign_steps(*)').eq('id',req.params.id).single();
