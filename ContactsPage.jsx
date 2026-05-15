@@ -4,6 +4,13 @@ import { api } from './api.js';
 
 const LEAD_LABEL_COLORS = { 'Interested':'var(--success)', 'Not Interested':'var(--danger)', 'Meeting Booked':'#7c3aed', 'Wrong Person':'var(--warning)', 'Unsubscribed':'var(--text-muted)', 'Follow Up':'var(--info)' };
 
+function formatDateTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return d.toLocaleDateString(undefined, { month:'short', day:'numeric', year:'numeric' })
+    + ' ' + d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit' });
+}
+
 export default function ContactsPage() {
   const [contacts, setContacts] = useState([]);
   const [total, setTotal] = useState(0);
@@ -27,7 +34,7 @@ export default function ContactsPage() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); }, [page, statusFilter, campaignFilter]); // search triggered manually via button/enter
+  useEffect(() => { load(); }, [page, statusFilter, campaignFilter]);
 
   const totalPages = Math.ceil(total / 50);
   const STATUS_FILTERS = ['all','active','completed','replied','bounced','blacklisted','unsubscribed'];
@@ -114,8 +121,8 @@ export default function ContactsPage() {
                           ) : '—'}
                         </td>
                         <td style={{ fontSize:12, color:'var(--text-secondary)' }}>{c.current_step > 0 ? `Step ${c.current_step}` : '—'}</td>
-                        <td style={{ fontSize:11, color:'var(--text-muted)' }}>{c.enrolled_at ? new Date(c.enrolled_at).toLocaleDateString() : '—'}</td>
-                        <td style={{ fontSize:11, color:'var(--text-muted)' }}>{c.next_send_at ? new Date(c.next_send_at).toLocaleDateString() : '—'}</td>
+                        <td style={{ fontSize:11, color:'var(--text-muted)', whiteSpace:'nowrap' }}>{formatDateTime(c.enrolled_at)}</td>
+                        <td style={{ fontSize:11, color:'var(--text-muted)', whiteSpace:'nowrap' }}>{formatDateTime(c.next_send_at)}</td>
                       </tr>
                     ))}
                   </tbody>
