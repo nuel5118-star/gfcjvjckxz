@@ -18,6 +18,15 @@ export function AnalyticsPage() {
 
   const t = data?.totals || {}, r = data?.rates || {};
 
+  const statCards = [
+    { l:'Sent',        v: t.sends   || 0, s: null },
+    { l:'Opens',       v: t.opens   || 0, s: `${r.open_rate   || 0}% rate` },
+    { l:'Clicks',      v: t.clicks  || 0, s: `${r.click_rate  || 0}% rate` },
+    { l:'Replies',     v: t.replies || 0, s: `${r.reply_rate  || 0}% rate` },
+    { l:'Bounces',     v: t.bounces || 0, s: `${r.bounce_rate || 0}% rate`, danger: true },
+    { l:'Failed',      v: t.failed  || 0, s: null, warn: true },
+  ];
+
   return (
     <div>
       <div className="topbar">
@@ -38,60 +47,90 @@ export function AnalyticsPage() {
       </div>
 
       <div className="page fade-in">
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:12, marginBottom:24 }}>
-          {[
-            { l:'Sent', v:t.sends||0 },
-            { l:'Opens', v:t.opens||0, s:`${r.open_rate||0}% rate` },
-            { l:'Clicks', v:t.clicks||0, s:`${r.click_rate||0}% rate` },
-            { l:'Replies', v:t.replies||0, s:`${r.reply_rate||0}% rate` },
-            { l:'Total Events', v:t.total||0 },
-          ].map(s => (
-            <div key={s.l} className="stat-card">
+        {/* Stat cards */}
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:12, marginBottom:24 }}>
+          {statCards.map(s => (
+            <div key={s.l} className="stat-card" style={{ borderTop: s.danger ? '3px solid var(--danger)' : s.warn ? '3px solid var(--warning)' : undefined }}>
               <div className="stat-label">{s.l}</div>
-              <div className="stat-value">{s.v}</div>
+              <div className="stat-value" style={{ color: s.danger && (t.bounces||0) > 0 ? 'var(--danger)' : s.warn && (t.failed||0) > 0 ? 'var(--warning)' : undefined }}>{s.v}</div>
               {s.s && <div className="stat-sub">{s.s}</div>}
             </div>
           ))}
         </div>
 
+        {/* Daily breakdown */}
         <div className="card" style={{ marginBottom:16 }}>
           <div style={{ fontWeight:600, fontSize:13, marginBottom:14 }}>Daily Breakdown</div>
-          {loading ? <div style={{ padding:20, textAlign:'center', color:'var(--text-muted)' }}>Loading...</div>
-            : data?.daily?.length > 0 ? (
-              <div className="table-wrap">
-                <table>
-                  <thead><tr><th>Date</th><th>Sent</th><th>Opens</th><th>Clicks</th><th>Replies</th><th>Open Rate</th><th>Reply Rate</th></tr></thead>
-                  <tbody>
-                    {data.daily.slice(-14).reverse().map(d => (
-                      <tr key={d.date}>
-                        <td style={{ fontWeight:500 }}>{d.date}</td>
-                        <td>{d.sends||0}</td>
-                        <td>{d.opens||0}</td>
-                        <td>{d.clicks||0}</td>
-                        <td>{d.replies||0}</td>
-                        <td>{d.sends>0?((d.opens/d.sends)*100).toFixed(1)+'%':'—'}</td>
-                        <td>{d.sends>0?((d.replies/d.sends)*100).toFixed(1)+'%':'—'}</td>
+          {loading
+            ? <div style={{ padding:20, textAlign:'center', color:'var(--text-muted)' }}>Loading...</div>
+            : data?.daily?.length > 0
+              ? (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Sent</th>
+                        <th>Opens</th>
+                        <th>Clicks</th>
+                        <th>Replies</th>
+                        <th>Bounces</th>
+                        <th>Failed</th>
+                        <th>Open Rate</th>
+                        <th>Reply Rate</th>
+                        <th>Bounce Rate</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : <div style={{ padding:20, textAlign:'center', color:'var(--text-muted)' }}>No data for this period</div>
+                    </thead>
+                    <tbody>
+                      {data.daily.slice(-14).reverse().map(d => (
+                        <tr key={d.date}>
+                          <td style={{ fontWeight:500 }}>{d.date}</td>
+                          <td>{d.sends||0}</td>
+                          <td>{d.opens||0}</td>
+                          <td>{d.clicks||0}</td>
+                          <td>{d.replies||0}</td>
+                          <td style={{ color:(d.bounces||0)>0?'var(--danger)':undefined, fontWeight:(d.bounces||0)>0?600:undefined }}>{d.bounces||0}</td>
+                          <td style={{ color:(d.failed||0)>0?'var(--warning)':undefined }}>{d.failed||0}</td>
+                          <td>{d.sends>0?((d.opens/d.sends)*100).toFixed(1)+'%':'—'}</td>
+                          <td>{d.sends>0?((d.replies/d.sends)*100).toFixed(1)+'%':'—'}</td>
+                          <td style={{ color:(d.bounces||0)>0?'var(--danger)':undefined }}>{d.sends>0?((( d.bounces||0)/d.sends)*100).toFixed(1)+'%':'—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+              : <div style={{ padding:20, textAlign:'center', color:'var(--text-muted)' }}>No data for this period</div>
           }
         </div>
 
+        {/* Inbox performance */}
         {data?.inboxes?.length > 0 && (
           <div className="card">
             <div style={{ fontWeight:600, fontSize:13, marginBottom:14 }}>Inbox Performance</div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Inbox</th><th>Sent</th><th>Opens</th><th>Replies</th><th>Open Rate</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Inbox</th>
+                    <th>Sent</th>
+                    <th>Opens</th>
+                    <th>Replies</th>
+                    <th>Bounces</th>
+                    <th>Open Rate</th>
+                    <th>Bounce Rate</th>
+                  </tr>
+                </thead>
                 <tbody>
                   {data.inboxes.map(i => (
                     <tr key={i.inbox}>
                       <td style={{ fontFamily:'monospace', fontSize:12 }}>{i.inbox}</td>
-                      <td>{i.sends}</td><td>{i.opens}</td><td>{i.replies}</td>
+                      <td>{i.sends}</td>
+                      <td>{i.opens}</td>
+                      <td>{i.replies}</td>
+                      <td style={{ color:(i.bounces||0)>0?'var(--danger)':undefined, fontWeight:(i.bounces||0)>0?600:undefined }}>{i.bounces||0}</td>
                       <td>{i.sends>0?((i.opens/i.sends)*100).toFixed(1)+'%':'—'}</td>
+                      <td style={{ color:(i.bounces||0)>0?'var(--danger)':undefined }}>{i.sends>0?(((i.bounces||0)/i.sends)*100).toFixed(1)+'%':'—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -147,7 +186,6 @@ export function InboxesPage() {
             </div>
           </div>
         )}
-
         {inboxes.length === 0 && !adding ? (
           <div className="card"><div className="empty"><div className="empty-icon">📬</div><div className="empty-title">No inboxes yet</div><div className="empty-sub">Add your sending email addresses</div><button onClick={() => setAdding(true)} className="btn btn-primary" style={{ display:'inline-flex' }}>Add First Inbox</button></div></div>
         ) : (
@@ -207,21 +245,26 @@ export function BlacklistPage() {
     const reader = new FileReader();
     reader.onload = async ev => {
       const csv = ev.target.result;
-      // Validate CSV has email column
       const firstLine = csv.split('\n')[0]?.toLowerCase() || '';
-      if (!firstLine.includes('email')) {
-        setImportResult({ error: 'CSV must have an "email" column header' });
-        return;
-      }
+      if (!firstLine.includes('email')) { setImportResult({ error: 'CSV must have an "email" column header' }); return; }
       const res = await api.importBlacklist(csv).catch(err => ({ error:err.message }));
-      setImportResult(res);
-      load();
+      setImportResult(res); load();
     };
-    reader.readAsText(file);
-    e.target.value = '';
+    reader.readAsText(file); e.target.value = '';
   };
 
   const totalPages = Math.ceil(total / 50);
+
+  // Colour-code reason badges
+  const reasonColor = (reason) => {
+    if (!reason) return 'var(--text-muted)';
+    const r = reason.toLowerCase();
+    if (r.includes('bounce')) return 'var(--danger)';
+    if (r.includes('spam')) return 'var(--danger)';
+    if (r.includes('unsub')) return 'var(--warning)';
+    if (r.includes('24h') || r.includes('confirmation')) return 'var(--warning)';
+    return 'var(--text-secondary)';
+  };
 
   return (
     <div>
@@ -246,11 +289,11 @@ export function BlacklistPage() {
             <div style={{ fontWeight:600, marginBottom:12 }}>Add to Blacklist</div>
             <div className="form-row">
               <div className="form-group"><label className="label">Email</label><input className="input" placeholder="email@example.com" value={newEmail} onChange={e => setNewEmail(e.target.value)} /></div>
-              <div className="form-group"><label className="label">Reason (optional)</label><input className="input" placeholder="e.g. unsubscribed" value={newReason} onChange={e => setNewReason(e.target.value)} /></div>
+              <div className="form-group"><label className="label">Reason (optional)</label><input className="input" placeholder="e.g. unsubscribed, bounce" value={newReason} onChange={e => setNewReason(e.target.value)} /></div>
             </div>
             <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
               <button onClick={() => { setAdding(false); setNewEmail(''); setNewReason(''); }} className="btn btn-secondary">Cancel</button>
-              <button onClick={async () => { if (!newEmail) return; await api.addToBlacklist(newEmail, newReason||'manual'); setAdding(false); setNewEmail(''); setNewReason(''); load(); }} className="btn btn-primary">Add</button>
+              <button onClick={async () => { if (!newEmail) return; await api.addToBlacklist(newEmail, newReason||'Manually blacklisted'); setAdding(false); setNewEmail(''); setNewReason(''); load(); }} className="btn btn-primary">Add</button>
             </div>
           </div>
         )}
@@ -266,8 +309,14 @@ export function BlacklistPage() {
                     {items.map(item => (
                       <tr key={item.id}>
                         <td style={{ fontFamily:'monospace', fontSize:12 }}>{item.email}</td>
-                        <td><span className="badge badge-draft">{item.reason||'manual'}</span></td>
-                        <td style={{ fontSize:12, color:'var(--text-muted)' }}>{new Date(item.created_at).toLocaleDateString()}</td>
+                        <td>
+                          <span style={{ fontSize:11, fontWeight:600, color: reasonColor(item.reason) }}>
+                            {item.reason || 'manual'}
+                          </span>
+                        </td>
+                        <td style={{ fontSize:12, color:'var(--text-muted)', whiteSpace:'nowrap' }}>
+                          {new Date(item.created_at).toLocaleDateString(undefined, { month:'short', day:'numeric', year:'numeric' })}
+                        </td>
                         <td><button onClick={async () => { await api.removeFromBlacklist(item.id); load(); }} className="btn btn-danger btn-sm">Remove</button></td>
                       </tr>
                     ))}
@@ -330,7 +379,6 @@ export function SettingsPage() {
       <div className="page fade-in" style={{ maxWidth:660 }}>
         {error && <div className="alert alert-error">{error}</div>}
         {saved && <div className="alert alert-success">Settings saved successfully</div>}
-
         <div className="card" style={{ marginBottom:16 }}>
           <div style={{ fontWeight:600, marginBottom:4 }}>🔗 Webhook URL</div>
           <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:12 }}>
@@ -346,7 +394,6 @@ export function SettingsPage() {
             </div>
           )}
         </div>
-
         <div className="card" style={{ marginBottom:16 }}>
           <div style={{ fontWeight:600, marginBottom:14 }}>⚡ Global Sending Defaults</div>
           <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:14 }}>These are defaults — each campaign can override them individually.</div>
@@ -366,7 +413,6 @@ export function SettingsPage() {
             </div>
           </div>
         </div>
-
         <div className="card" style={{ background:'var(--bg-subtle)' }}>
           <div style={{ fontWeight:600, marginBottom:4 }}>🗄 Database</div>
           <div style={{ fontSize:13, color:'var(--text-secondary)' }}>
