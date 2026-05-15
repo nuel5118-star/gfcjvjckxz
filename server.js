@@ -99,7 +99,8 @@ async function logSchedulerActivity(type,message,details={},runId=null){
 }
 
 async function addToBlacklist(email,reason){
-  await supabase.from('blacklist').upsert({email:normalizeEmail(email),reason,created_at:new Date().toISOString()},{onConflict:'email'});
+  // reason should be a clear human-readable message e.g. 'Bounce — email does not exist'
+  await supabase.from('blacklist').upsert({email:normalizeEmail(email),reason:reason||'Manually blacklisted',created_at:new Date().toISOString()},{onConflict:'email'});
   await supabase.from('contacts').update({status:'blacklisted',next_send_at:null}).eq('email',normalizeEmail(email));
 }
 
@@ -369,21 +370,23 @@ app.post('/api/campaigns/:id/resume',async(req,res)=>{
   const tz=campaign.timezone||'America/New_York';
   const sw=campaign.skip_weekends!==false;
 
-  // Find all active contacts that are mid-sequence but have no next_send_at —
-  // these are paused/rolled-back contacts that need re-queuing.
-  // Also pick up any contact whose next_send_at is null regardless of how it got that way.
+  // Find ALL active contacts mid-sequence — null next_send_at AND stale (past) next_send_at.
+  // When a campaign is paused, contacts keep their old scheduled times which become stale.
+  // On resume we need to re-queue both: contacts with no time and contacts with expired times.
   const{data:contacts}=await supabase
     .from('contacts')
     .select('id,current_step,next_send_at')
     .eq('campaign_id',req.params.id)
     .eq('status','active')
-    .gt('current_step',0)
-    .is('next_send_at',null);
+    .gt('current_step',0);
 
   let requeued=0;
   const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
 
   for(const contact of contacts||[]){
+    // Skip contacts already scheduled in the future — their time is still valid
+    if(contact.next_send_at&&new Date(contact.next_send_at)>now) continue;
+
     // Use per-step hours if defined, fall back to campaign-level hours
     const stepDef=steps.find(s=>s.step_number===contact.current_step);
     const hs=stepDef?.send_hour_start||campaign.send_hour_start||9;
@@ -399,6 +402,23 @@ app.post('/api/campaigns/:id/resume',async(req,res)=>{
 
   await logSchedulerActivity('info',`Campaign resumed — ${requeued} contacts re-queued with fresh send times`,{campaign_id:req.params.id,requeued});
   res.json({ok:true,requeued});
+});
+
+// INBOX ROTATION — reassign contacts across all currently active inboxes
+// Useful when new inboxes are added after launch, or to rebalance existing assignments
+app.post('/api/campaigns/:id/rebalance-inboxes',async(req,res)=>{
+  const inboxes=await getInboxes();
+  if(!inboxes.length)return res.status(400).json({error:'No active inboxes'});
+  const{data:contacts}=await supabase.from('contacts').select('id').eq('campaign_id',req.params.id).eq('status','active').gt('current_step',0);
+  if(!contacts?.length)return res.json({ok:true,rebalanced:0});
+  let i=0;
+  for(const contact of contacts){
+    const inbox=inboxes[i%inboxes.length];
+    await supabase.from('contacts').update({assigned_inbox:inbox.email}).eq('id',contact.id);
+    i++;
+  }
+  await logSchedulerActivity('info',`Inbox rebalance — ${contacts.length} contacts redistributed across ${inboxes.length} inboxes`,{campaign_id:req.params.id});
+  res.json({ok:true,rebalanced:contacts.length,inboxes:inboxes.map(x=>x.email)});
 });
 
 app.post('/api/campaigns/:id/launch',async(req,res)=>{
@@ -541,20 +561,43 @@ app.get('/api/analytics',async(req,res)=>{
 });
 
 // REPLY RECEIVED — primary n8n reply webhook
+// Also handles explicit bounce reports from the n8n bounce branch (is_bounce: true)
 app.post('/api/reply-received',async(req,res)=>{
-  const{sender_email,subject,body,is_auto_reply,inbox}=req.body;
+  const{sender_email,subject,body,is_auto_reply,is_bounce,inbox}=req.body;
   const email=normalizeEmail(sender_email||'');if(!email)return res.json({ok:true});
-  const autoReply=is_auto_reply||detectAutoReply(subject,body);
-  const unsub=detectUnsubscribe(body);const bounce=detectBounce(subject,body);
+
+  // is_bounce:true comes from the n8n bounce branch — skip detection, go straight to bounce handling
+  const forcedBounce=is_bounce===true||is_bounce==='true';
+  const autoReply=!forcedBounce&&(is_auto_reply||detectAutoReply(subject,body));
+  const unsub=!forcedBounce&&detectUnsubscribe(body);
+  const bounce=forcedBounce||detectBounce(subject,body);
+
   const{data:contactRow}=await supabase.from('contacts').select('id,campaign_id,campaigns!inner(name,stop_on_auto_reply)').eq('email',email).limit(1).single();
   const campaignName=contactRow?.campaigns?.name||null;
+  const campaignId=contactRow?.campaign_id||null;
+  const contactId=contactRow?.id||null;
+
   const eventType=bounce?'bounce':unsub?'unsubscribe':autoReply?'auto_reply':'reply';
   await supabase.from('email_events').insert({type:eventType,recipient:sender_email,inbox,subject,reply_body:body,campaign:campaignName,created_at:new Date().toISOString()});
+
   if(bounce){
-    await addToBlacklist(email,'bounce');
-    await logSchedulerActivity('warn',`Bounce for ${email}`,{email,subject});
+    // Blacklist with clear reason
+    await addToBlacklist(email,forcedBounce?'Bounce — email does not exist or was rejected by recipient server':'bounce');
+    // Flip most recent sequence_send for this contact from sent/pending to bounced
+    if(contactId&&campaignId){
+      const{data:sendRecord}=await supabase.from('sequence_sends').select('id').eq('contact_id',contactId).eq('campaign_id',campaignId).in('status',['sent','pending']).order('sent_at',{ascending:false}).limit(1).single();
+      if(sendRecord){
+        await supabase.from('sequence_sends').update({status:'bounced',error_message:'Bounce — email rejected by recipient server'}).eq('id',sendRecord.id);
+        // Remove the send event from analytics so it no longer counts as a successful send
+        await supabase.from('email_events').delete().eq('type','send').eq('contact_id',contactId).eq('campaign_id',campaignId);
+        // Write bounce event
+        await supabase.from('email_events').insert({type:'bounce',recipient:email,inbox,campaign:campaignName,campaign_id:campaignId,contact_id:contactId,created_at:new Date().toISOString()});
+      }
+    }
+    await supabase.from('contacts').update({status:'bounced',next_send_at:null,finished_at:new Date().toISOString()}).eq('email',email);
+    await logSchedulerActivity('warn',`Bounce for ${email} — blacklisted, send record corrected`,{email,subject,forced:forcedBounce});
   }else if(unsub){
-    await addToBlacklist(email,'unsubscribed');
+    await addToBlacklist(email,'Unsubscribed — contact requested removal');
     await logSchedulerActivity('info',`Unsubscribe from ${email}`,{email});
   }else if(autoReply){
     if(contactRow?.campaigns?.stop_on_auto_reply){
@@ -567,7 +610,7 @@ app.post('/api/reply-received',async(req,res)=>{
     await supabase.from('contacts').update({status:'replied',finished_at:new Date().toISOString(),next_send_at:null}).eq('email',email);
     await logSchedulerActivity('info',`Reply from ${email} — sequence stopped`,{email,campaign:campaignName});
   }
-  res.json({ok:true,detected:{bounce,unsub,autoReply,eventType}});
+  res.json({ok:true,detected:{bounce,unsub,autoReply,eventType,forcedBounce}});
 });
 
 // ── N8N DELIVERY CONFIRMATION ─────────────────────────────────────────────────
@@ -600,11 +643,10 @@ app.post('/api/email/delivery-report',async(req,res)=>{
     await supabase.from('sequence_sends').update({status:dbStatus,error_message:reason||null}).eq('id',sendRecord.id);
   }
   if(status==='delivered'){
-    // This is the ONLY place we count a real send — when n8n confirms delivery.
-    // We also write the email_events 'send' record here, not in the scheduler.
+    // Flip sequence_send to confirmed sent
     if(sendRecord){
       await supabase.from('sequence_sends').update({status:'sent',error_message:null}).eq('id',sendRecord.id);
-      // Write the confirmed send event — this is what analytics counts
+      // Write confirmed send event — this is what analytics counts
       await supabase.from('email_events').insert({
         type:'send',recipient:cleanEmail,inbox,
         campaign:campaign_id,campaign_id:campaign_id,
@@ -614,7 +656,30 @@ app.post('/api/email/delivery-report',async(req,res)=>{
         created_at:new Date().toISOString()
       });
     }
-    await logSchedulerActivity('send',`✓ Confirmed delivery for ${cleanEmail}`,{email:cleanEmail,inbox,step,campaign_id});
+    // FIX 3: advance contact to next step HERE after confirmed delivery — not in the scheduler.
+    // Previously the scheduler advanced the contact before n8n even sent the email.
+    // Now we do it only after we know it was actually delivered.
+    if(contact_id&&campaign_id&&step){
+      const{data:contact}=await supabase.from('contacts').select('current_step,campaign_id').eq('id',contact_id).single();
+      const{data:camp}=await supabase.from('campaigns').select('*,campaign_steps(*)').eq('id',campaign_id).single();
+      if(contact&&camp){
+        const steps=(camp.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+        const currentStepNum=parseInt(step);
+        const stepIndex=steps.findIndex(s=>s.step_number===currentStepNum);
+        const nextStep=steps[stepIndex+1];
+        const tz=camp.timezone||'America/New_York';
+        const sw=camp.skip_weekends!==false;
+        if(nextStep){
+          const hs=nextStep.send_hour_start||camp.send_hour_start||9;
+          const he=nextStep.send_hour_end||camp.send_hour_end||17;
+          const nextSend=getScheduledTime(new Date(),nextStep.delay_days,hs,he,sw,tz);
+          await supabase.from('contacts').update({current_step:nextStep.step_number,next_send_at:nextSend.toISOString()}).eq('id',contact_id);
+        }else{
+          await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact_id);
+        }
+      }
+    }
+    await logSchedulerActivity('send',`✓ Confirmed delivery for ${cleanEmail} — contact advanced`,{email:cleanEmail,inbox,step,campaign_id});
     return res.json({ok:true,action:'confirmed_sent',email:cleanEmail});
   }
   if(status==='bounced'){
@@ -735,17 +800,10 @@ async function runScheduler(manual=false){
           send_id:sendId,subject
         });
 
-        // Pre-advance contact to next step now so DB is consistent even if webhook call hangs
-        const nextStep=steps[stepIndex+1];
-        if(nextStep){
-          const shs=nextStep.send_hour_start||campaign.send_hour_start||9;
-          const she=nextStep.send_hour_end||campaign.send_hour_end||17;
-          let nextSend=getScheduledTime(now,nextStep.delay_days,shs,she,campaign.skip_weekends,tz);
-          nextSend=addMinutes(nextSend,Math.floor(Math.random()*(campaign.random_delay_max||30)));
-          await supabase.from('contacts').update({current_step:nextStep.step_number,next_send_at:nextSend.toISOString()}).eq('id',contact.id);
-        }else{
-          await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);
-        }
+        // Contact stays on current step with next_send_at set to null (in-flight).
+        // Advancement to next step happens in /api/email/delivery-report after n8n confirms delivery.
+        // This prevents contacts skipping steps when n8n fails silently.
+        await supabase.from('contacts').update({next_send_at:null}).eq('id',contact.id);
 
         inboxCounts[inbox]=(inboxCounts[inbox]||0)+1;
         totalSentThisRun++;
@@ -833,6 +891,29 @@ async function runScheduler(manual=false){
 }
 
 cron.schedule('*/30 * * * *',()=>runScheduler(false));
+
+// PENDING CLEANUP — runs once per day at 2am
+// Finds sequence_sends stuck as 'pending' for more than 24 hours (n8n never called back)
+// Marks them failed, blacklists the email, writes a failed event to analytics
+cron.schedule('0 2 * * *',async()=>{
+  console.log('[Cleanup] Running 24h pending cleanup');
+  const cutoff=new Date(Date.now()-24*60*60*1000).toISOString();
+  const{data:stale}=await supabase.from('sequence_sends').select('id,email,contact_id,campaign_id,inbox,step_number').eq('status','pending').lt('sent_at',cutoff);
+  if(!stale?.length){console.log('[Cleanup] No stale pending records found');return;}
+  console.log(`[Cleanup] Found ${stale.length} stale pending records`);
+  for(const record of stale){
+    // Mark as failed
+    await supabase.from('sequence_sends').update({status:'failed',error_message:'No delivery confirmation received after 24 hours — n8n may not have processed this send'}).eq('id',record.id);
+    // Blacklist with clear reason
+    await supabase.from('blacklist').upsert({email:normalizeEmail(record.email),reason:'No delivery confirmation after 24h — email may be invalid or n8n failed to send',created_at:new Date().toISOString()},{onConflict:'email'});
+    // Update contact status
+    await supabase.from('contacts').update({status:'bounced',next_send_at:null,finished_at:new Date().toISOString()}).eq('email',normalizeEmail(record.email));
+    // Write failed event to analytics
+    await supabase.from('email_events').insert({type:'send_failed',recipient:record.email,inbox:record.inbox,campaign_id:record.campaign_id,step_number:record.step_number,created_at:new Date().toISOString()});
+    await logSchedulerActivity('warn',`Stale pending cleaned up — ${record.email}`,{email:record.email,send_id:record.id,reason:'No confirmation after 24h'});
+  }
+  console.log(`[Cleanup] Done — ${stale.length} stale records processed`);
+});
 
 // SCHEDULER API
 app.get('/api/scheduler/status',async(req,res)=>{
