@@ -368,10 +368,13 @@ app.post('/api/campaigns/:id/launch',async(req,res)=>{
   for(let i=0;i<contacts.length;i++){
     const inbox=inboxes[i%inboxes.length];const contact=contacts[i];
     const hourStart=firstStep.send_hour_start||campaign.send_hour_start||9;const hourEnd=firstStep.send_hour_end||campaign.send_hour_end||17;
+    // Try to schedule within today's window first
     let sendTime=getScheduledTime(now,0,hourStart,hourEnd,campaign.skip_weekends,tz);
-    if(isBefore(sendTime,now))sendTime=addMinutes(now,5);
-    const randomDelay=Math.floor(Math.random()*(campaign.random_delay_max||30));
-    sendTime=addMinutes(sendTime,randomDelay);
+    // If today's window has already passed, push to next business day within the correct window.
+    // Do NOT fall back to now+5mins — that ignores the campaign send window entirely.
+    if(isBefore(sendTime,now))sendTime=getScheduledTime(now,1,hourStart,hourEnd,campaign.skip_weekends,tz);
+    // No random_delay_max added here — getScheduledTime already randomizes within the window.
+    // Adding extra minutes on top pushes contacts outside the tight window the user configured.
     await supabase.from('contacts').update({assigned_inbox:inbox.email,current_step:1,next_send_at:sendTime.toISOString(),status:'active'}).eq('id',contact.id);
   }
   await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);
@@ -551,8 +554,22 @@ app.post('/api/email/delivery-report',async(req,res)=>{
     await supabase.from('sequence_sends').update({status:dbStatus,error_message:reason||null}).eq('id',sendRecord.id);
   }
   if(status==='delivered'){
-    await supabase.from('email_events').insert({type:'delivered',recipient:cleanEmail,inbox,campaign:campaign_id,created_at:new Date().toISOString()});
-    return res.json({ok:true,action:'logged_delivery',email:cleanEmail});
+    // This is the ONLY place we count a real send — when n8n confirms delivery.
+    // We also write the email_events 'send' record here, not in the scheduler.
+    if(sendRecord){
+      await supabase.from('sequence_sends').update({status:'sent',error_message:null}).eq('id',sendRecord.id);
+      // Write the confirmed send event — this is what analytics counts
+      await supabase.from('email_events').insert({
+        type:'send',recipient:cleanEmail,inbox,
+        campaign:campaign_id,campaign_id:campaign_id,
+        contact_id:contact_id||null,
+        step_number:step?parseInt(step):null,
+        send_id:sendRecord.id,
+        created_at:new Date().toISOString()
+      });
+    }
+    await logSchedulerActivity('send',`✓ Confirmed delivery for ${cleanEmail}`,{email:cleanEmail,inbox,step,campaign_id});
+    return res.json({ok:true,action:'confirmed_sent',email:cleanEmail});
   }
   if(status==='bounced'){
     await addToBlacklist(cleanEmail,'bounce');
@@ -709,29 +726,25 @@ async function runScheduler(manual=false){
         try{
           await axios.post(settings.webhook_url,{batch:emailBatch},{timeout:60000});
 
-          // Bulk insert sequence_sends for the whole batch — one DB round-trip
+          // Insert sequence_sends as 'pending' — status only flips to 'sent' when
+          // n8n calls back /api/email/delivery-report confirming actual delivery.
+          // Counting as 'sent' here was the bug — we were counting webhook acknowledgement
+          // not actual email delivery.
           await supabase.from('sequence_sends').insert(
             batchMeta.map(m=>({
               id:m.sendId,
               campaign_id:m.campaign_id,contact_id:m.contact_id,
               email:m.email,inbox:m.inbox,step_number:m.step_number,
               subject:m.subject,body:m.body,
-              sent_at:new Date().toISOString(),status:'sent'
+              sent_at:new Date().toISOString(),status:'pending'
             }))
           );
 
-          // Bulk insert send events
-          await supabase.from('email_events').insert(
-            batchMeta.map(m=>({
-              type:'send',recipient:m.email,inbox:m.inbox,
-              campaign:m.campaign_name,campaign_id:m.campaign_id,
-              contact_id:m.contact_id,step_number:m.step_number,send_id:m.sendId,
-              subject:m.subject,created_at:new Date().toISOString()
-            }))
-          );
+          // Do NOT insert email_events 'send' here — that happens in /api/email/delivery-report
+          // when n8n confirms the email was actually sent. Inserting here was double-counting.
 
           result.sent+=emailBatch.length;
-          await logSchedulerActivity('send',`✓ Batch sent: ${emailBatch.length} emails dispatched to n8n`,{
+          await logSchedulerActivity('send',`✓ Batch queued: ${emailBatch.length} emails dispatched to n8n — awaiting delivery confirmation`,{
             count:emailBatch.length,
             emails:emailBatch.map(e=>e.to),
             steps:[...new Set(emailBatch.map(e=>e.step))]
@@ -773,7 +786,7 @@ async function runScheduler(manual=false){
   return result;
 }
 
-cron.schedule('*/5 * * * *',()=>runScheduler(false));
+cron.schedule('*/30 * * * *',()=>runScheduler(false));
 
 // SCHEDULER API
 app.get('/api/scheduler/status',async(req,res)=>{
