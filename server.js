@@ -88,6 +88,23 @@ async function getTotalDailyCount(){const today=new Date();today.setHours(0,0,0,
 async function getNewLeadsTodayCount(campaignId){const today=new Date();today.setHours(0,0,0,0);const{count}=await supabase.from('sequence_sends').select('*',{count:'exact',head:true}).eq('campaign_id',campaignId).eq('step_number',1).gte('sent_at',today.toISOString());return count||0;}
 async function isBlacklisted(email){const{data}=await supabase.from('blacklist').select('id').eq('email',normalizeEmail(email)).limit(1);return data&&data.length>0;}
 
+// fetchAll: paginates through ALL rows of any Supabase query, bypassing the 1000-row default cap.
+// Usage: const rows = await fetchAll(() => supabase.from('table').select('col').eq('x', y));
+async function fetchAll(buildQuery) {
+  const PAGE = 1000;
+  let all = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await buildQuery().range(offset, offset + PAGE - 1);
+    if (error) { console.error('[fetchAll] Query error:', error.message); break; }
+    if (!data || data.length === 0) break;
+    all = all.concat(data);
+    if (data.length < PAGE) break;
+    offset += PAGE;
+  }
+  return all;
+}
+
 async function logSchedulerActivity(type,message,details={},runId=null){
   const entry={id:`live_${Date.now()}_${Math.random().toString(36).slice(2,5)}`,type,message,details,run_id:runId,created_at:new Date().toISOString()};
   console.log(`[${type.toUpperCase()}]`,message,Object.keys(details).length?JSON.stringify(details):'');
@@ -359,7 +376,7 @@ app.post('/api/campaigns/:id/launch',async(req,res)=>{
   const{data:campaign}=await supabase.from('campaigns').select('*, campaign_steps(*)').eq('id',req.params.id).single();
   if(!campaign)return res.status(404).json({error:'Campaign not found'});
   if(!campaign.campaign_steps?.length)return res.status(400).json({error:'No email steps configured'});
-  const{data:contacts}=await supabase.from('contacts').select('*').eq('campaign_id',req.params.id).eq('status','active').eq('current_step',0);
+  const contacts=await fetchAll(()=>supabase.from('contacts').select('*').eq('campaign_id',req.params.id).eq('status','active').eq('current_step',0));
   if(!contacts?.length)return res.status(400).json({error:'No contacts — import contacts first'});
   const inboxes=await getInboxes();
   if(!inboxes.length)return res.status(400).json({error:'No active inboxes configured'});
@@ -394,12 +411,12 @@ app.get('/api/campaigns/:id/analytics',async(req,res)=>{
   const cid=req.params.id;
   const{data:camp}=await supabase.from('campaigns').select('name').eq('id',cid).single();
   const campName=camp?.name||cid;
-  const{data:events}=await supabase.from('email_events').select('type,created_at,inbox').or(`campaign.eq.${campName},campaign.eq.${cid}`);
+  const events=await fetchAll(()=>supabase.from('email_events').select('type,created_at,inbox').or(`campaign.eq.${campName},campaign.eq.${cid}`));
   const ev=events||[];
   const sends=ev.filter(e=>e.type==='send').length,opens=ev.filter(e=>e.type==='open').length,clicks=ev.filter(e=>e.type==='click').length,replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
-  const{data:sbs}=await supabase.from('sequence_sends').select('step_number').eq('campaign_id',cid);
+  const sbs=await fetchAll(()=>supabase.from('sequence_sends').select('step_number').eq('campaign_id',cid));
   const stepBreakdown={};(sbs||[]).forEach(s=>{stepBreakdown[s.step_number]=(stepBreakdown[s.step_number]||0)+1;});
-  const{data:cs}=await supabase.from('contacts').select('status').eq('campaign_id',cid);
+  const cs=await fetchAll(()=>supabase.from('contacts').select('status').eq('campaign_id',cid));
   const statusBreakdown={};(cs||[]).forEach(c=>{statusBreakdown[c.status]=(statusBreakdown[c.status]||0)+1;});
   res.json({totals:{sends,opens,clicks,replies},rates:{open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0'},step_breakdown:stepBreakdown,status_breakdown:statusBreakdown});
 });
@@ -440,9 +457,9 @@ app.post('/api/campaigns/:id/contacts/bulk',async(req,res)=>{
   res.json({ok:true,affected:contact_ids.length});
 });
 app.get('/api/campaigns/:id/contacts/export',async(req,res)=>{
-  let q=supabase.from('contacts').select('*').eq('campaign_id',req.params.id).order('enrolled_at',{ascending:false});
-  if(req.query.status&&req.query.status!=='all')q=q.eq('status',req.query.status);
-  const{data}=await q;if(!data?.length)return res.status(404).json({error:'No contacts'});
+  const statusFilter=req.query.status&&req.query.status!=='all'?req.query.status:null;
+  const data=await fetchAll(()=>{let q=supabase.from('contacts').select('*').eq('campaign_id',req.params.id).order('enrolled_at',{ascending:false});if(statusFilter)q=q.eq('status',statusFilter);return q;});
+  if(!data?.length)return res.status(404).json({error:'No contacts'});
   const headers=['email','first_name','last_name','company','city','phone','business_url','timezone','status','lead_label','current_step','enrolled_at','next_send_at','assigned_inbox'];
   const rows=data.map(c=>headers.map(h=>`"${String(c[h]||'').replace(/"/g,'""')}"`).join(','));
   res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename="contacts.csv"`);
@@ -481,10 +498,10 @@ app.get('/api/analytics',async(req,res)=>{
   else if(date==='week')fromDate=new Date(now.getTime()-7*86400000).toISOString();
   else if(date==='month')fromDate=new Date(now.getTime()-30*86400000).toISOString();
   const defaultFrom=fromDate||new Date(Date.now()-90*86400000).toISOString();
-  let q=supabase.from('email_events').select('type,inbox,campaign,created_at');
-  q=q.gte('created_at',defaultFrom);
-  if(campaign_id)q=q.eq('campaign',campaign_id);
-  const{data:events}=await q;const ev=events||[];
+  const campaignFilter=campaign_id||null;
+  const ev=await fetchAll(()=>{let q=supabase.from('email_events').select('type,inbox,campaign,created_at').gte('created_at',defaultFrom);if(campaignFilter)q=q.eq('campaign',campaignFilter);return q;});
+
+  const sends=ev.filter(e=>e.type==='send').length,opens=ev.filter(e=>e.type==='open').length,clicks=ev.filter(e=>e.type==='click').length,replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
   const sends=ev.filter(e=>e.type==='send').length,opens=ev.filter(e=>e.type==='open').length,clicks=ev.filter(e=>e.type==='click').length,replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
   const dailyMap={};ev.forEach(e=>{const day=e.created_at?.split('T')[0];if(!day)return;if(!dailyMap[day])dailyMap[day]={date:day,sends:0,opens:0,clicks:0,replies:0};const typeKey={send:'sends',open:'opens',click:'clicks',reply:'replies',replied:'replies'}[e.type]||e.type;dailyMap[day][typeKey]=(dailyMap[day][typeKey]||0)+1;});
   const inboxMap={};ev.forEach(e=>{if(!e.inbox)return;if(!inboxMap[e.inbox])inboxMap[e.inbox]={inbox:e.inbox,sends:0,opens:0,replies:0};if(e.type==='send')inboxMap[e.inbox].sends++;if(e.type==='open')inboxMap[e.inbox].opens++;if(e.type==='reply'||e.type==='replied')inboxMap[e.inbox].replies++;});
@@ -613,9 +630,10 @@ async function runScheduler(manual=false){
     let totalSentThisRun=0;
     const newLeadsCache={};
     // FIX: pre-fetch blacklist and replied emails as Sets — prevents N+1 queries
-    const{data:blacklistRows}=await supabase.from('blacklist').select('email');
-    const blacklistSet=new Set((blacklistRows||[]).map(r=>r.email));
-    const{data:repliedRows}=await supabase.from('email_events').select('recipient').eq('type','reply');
+    // fetchAll ensures complete blacklist/replied sets — capped at 1000 = emails sent to wrong people
+    const blacklistSet=new Set(blacklistRows.map(r=>r.email));
+    const repliedRows=await fetchAll(()=>supabase.from('email_events').select('recipient').in('type',['reply','replied']));
+    const repliedSet=new Set(repliedRows.map(r=>normalizeEmail(r.recipient)));
     const repliedSet=new Set((repliedRows||[]).map(r=>normalizeEmail(r.recipient)));
     await logSchedulerActivity('info',`Pre-fetched ${blacklistSet.size} blacklisted, ${repliedSet.size} replied emails`,{},runId);
     while(true){
@@ -782,7 +800,7 @@ app.get('/api/scheduler/status',async(req,res)=>{
   const{count:failedToday}=await supabase.from('sequence_sends').select('*',{count:'exact',head:true}).gte('sent_at',today.toISOString()).eq('status','failed');
   const{count:pendingCount}=await supabase.from('contacts').select('*',{count:'exact',head:true}).eq('status','active').not('next_send_at','is',null).lte('next_send_at',now.toISOString()).gt('current_step',0);
   const{count:scheduledToday}=await supabase.from('contacts').select('*',{count:'exact',head:true}).eq('status','active').not('next_send_at','is',null).gt('next_send_at',now.toISOString()).lte('next_send_at',new Date(today.getTime()+86400000).toISOString()).gt('current_step',0);
-  const{data:inboxSends}=await supabase.from('sequence_sends').select('inbox').gte('sent_at',today.toISOString()).eq('status','sent');
+  const inboxSends=await fetchAll(()=>supabase.from('sequence_sends').select('inbox').gte('sent_at',today.toISOString()).eq('status','sent'));
   const inboxCounts={};(inboxSends||[]).forEach(s=>{inboxCounts[s.inbox]=(inboxCounts[s.inbox]||0)+1;});
   const{data:inboxes}=await supabase.from('inboxes').select('email,daily_cap,active').eq('active',true);
   const inboxStatus=(inboxes||[]).map(i=>({email:i.email,sent:inboxCounts[i.email]||0,cap:i.daily_cap||100,pct:Math.round(((inboxCounts[i.email]||0)/(i.daily_cap||100))*100)}));
@@ -881,6 +899,99 @@ app.get('/api/contacts/check',async(req,res)=>{
   const contact=data[0];
   const{data:camp}=await supabase.from('campaigns').select('name,status').eq('id',contact.campaign_id).single();
   res.json({found:true,contact:{...contact,campaign_name:camp?.name||'Unknown',campaign_status:camp?.status||'unknown'}});
+});
+
+// CALCULATOR LEADS
+app.get('/api/calculator-leads', async (req, res) => {
+  const { table, search } = req.query;
+  const page = parseInt(req.query.page || '1');
+  const pageSize = parseInt(req.query.pageSize || '50');
+  const offset = (page - 1) * pageSize;
+
+  // Map frontend param values to real Supabase table names
+  const tableMap = {
+    missed_revenue: 'calculator_form_submissions',
+    ad_calculator:  'ad_calculator_submissions',
+  };
+
+  const realTable = tableMap[table];
+  if (!realTable) {
+    return res.status(400).json({ error: 'Invalid table name. Must be missed_revenue or ad_calculator.' });
+  }
+
+  let query = supabase
+    .from(realTable)
+    .select('*', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + pageSize - 1);
+
+  if (search && search.trim()) {
+    query = query.ilike('email', `%${search.trim()}%`);
+  }
+
+  const { data, count, error } = await query;
+  if (error) return res.status(500).json({ error: error.message });
+
+  res.json({ leads: data || [], total: count || 0, page, pageSize });
+});
+
+// REPLIES
+// Queries email_events for all reply-type events.
+// Handles variations: 'reply', 'replied', 'auto_reply', 'unsubscribe'
+// Enriches each event with the matching contact + campaign from contacts table.
+app.get('/api/replies', async (req, res) => {
+  const { type, search } = req.query;
+  const page = parseInt(req.query.page || '1');
+  const pageSize = parseInt(req.query.pageSize || '50');
+  const offset = (page - 1) * pageSize;
+
+  // All reply-type keywords saved to email_events — covers past + future variations
+  const ALL_REPLY_TYPES = ['reply', 'replied', 'auto_reply', 'unsubscribe'];
+
+  let typeFilter;
+  if (type === 'reply') {
+    // Real human replies only
+    typeFilter = ['reply', 'replied'];
+  } else if (type === 'auto_reply') {
+    typeFilter = ['auto_reply'];
+  } else {
+    // 'all' — everything reply-ish
+    typeFilter = ALL_REPLY_TYPES;
+  }
+
+  let q = supabase
+    .from('email_events')
+    .select('*', { count: 'exact' })
+    .in('type', typeFilter)
+    .order('created_at', { ascending: false })
+    .range(offset, offset + pageSize - 1);
+
+  if (search && search.trim()) {
+    q = q.ilike('recipient', `%${search.trim()}%`);
+  }
+
+  const { data: events, count, error } = await q;
+  if (error) return res.status(500).json({ error: error.message });
+
+  // Batch-fetch contacts for this page of emails — one query, not N queries
+  const emails = [...new Set((events || []).map(e => normalizeEmail(e.recipient || '')).filter(Boolean))];
+  let contactMap = {};
+  if (emails.length > 0) {
+    const { data: contacts } = await supabase
+      .from('contacts')
+      .select('id, email, first_name, last_name, campaign_id, campaigns(name)')
+      .in('email', emails);
+    (contacts || []).forEach(c => {
+      contactMap[normalizeEmail(c.email || '')] = c;
+    });
+  }
+
+  const replies = (events || []).map(e => ({
+    ...e,
+    contact: contactMap[normalizeEmail(e.recipient || '')] || null,
+  }));
+
+  res.json({ replies, total: count || 0, page, pageSize });
 });
 
 app.use(express.static(path.join(__dirname,'dist')));
