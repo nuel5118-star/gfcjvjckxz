@@ -890,14 +890,19 @@ app.get('/api/calculator-leads', async (req, res) => {
   const pageSize = parseInt(req.query.pageSize || '50');
   const offset = (page - 1) * pageSize;
 
-  // Allowlist table names — never pass raw user input to Supabase
-  const allowedTables = ['missed_revenue', 'ad_calculator'];
-  if (!allowedTables.includes(table)) {
+  // Map frontend param values to real Supabase table names
+  const tableMap = {
+    missed_revenue: 'calculator_form_submissions',
+    ad_calculator:  'ad_calculator_submissions',
+  };
+
+  const realTable = tableMap[table];
+  if (!realTable) {
     return res.status(400).json({ error: 'Invalid table name. Must be missed_revenue or ad_calculator.' });
   }
 
   let query = supabase
-    .from(table)
+    .from(realTable)
     .select('*', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(offset, offset + pageSize - 1);
