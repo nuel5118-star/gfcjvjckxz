@@ -23,7 +23,7 @@ const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBR
 
 // Base URL for tracking pixel and click redirect URLs embedded into emails
 // Set APP_URL in Railway environment variables — must be your public Railway domain
-const APP_URL = (process.env.APP_URL || 'https://gfcjvjckxz.onrender.com').replace(/\/$/,'');
+const APP_URL = (process.env.APP_URL || 'https://gfcjvjckxz-production.up.railway.app').replace(/\/$/,'');
 
 // SSE: connected browser clients that receive real-time log pushes
 const sseClients = new Set();
@@ -323,17 +323,26 @@ app.put('/api/campaigns/:id',async(req,res)=>{
     // because the delete/reinsert above hadn't been reflected in the earlier DB query.
     const newSteps=steps||[];
 
-    // Paginate — no 1000 row cap. No gt(next_send_at) filter — reschedule ALL including overdue/paused
-    let allRc=[];let rcOff=0;
-    while(true){const{data:pg}=await supabase.from('contacts').select('id,current_step,next_send_at').eq('campaign_id',req.params.id).eq('status','active').gt('current_step',0).range(rcOff,rcOff+999);if(!pg?.length)break;allRc=allRc.concat(pg);if(pg.length<1000)break;rcOff+=1000;}
+    const{data:contacts}=await supabase
+      .from('contacts')
+      .select('id,current_step,next_send_at')
+      .eq('campaign_id',req.params.id)
+      .eq('status','active')
+      .gt('current_step',0)
+      .gt('next_send_at',now.toISOString());
 
-    for(const contact of allRc){
+    for(const contact of contacts||[]){
+      // Per-step hours take priority over campaign-level hours.
+      // newSteps is 0-indexed array; contact.current_step is 1-based step number.
       const stepDef=newSteps[contact.current_step-1];
       const hs=stepDef?.send_hour_start||send_hour_start||9;
-      const he=stepDef?.send_hour_end||send_hour_end||17;
-      const baseDate=contact.next_send_at&&new Date(contact.next_send_at)>now?new Date(contact.next_send_at):now;
-      let newSendTime=getScheduledTime(baseDate,0,hs,he,sw,tz);
-      if(newSendTime<=now)newSendTime=getScheduledTime(now,1,hs,he,sw,tz);
+      const he=stepDef?.send_hour_end  ||send_hour_end  ||17;
+
+      let newSendTime=getScheduledTime(new Date(contact.next_send_at),0,hs,he,sw,tz);
+      // If recalculated time is in the past (e.g. window moved to earlier today and that
+      // window has already passed), push to the next business day.
+      if(newSendTime<=now) newSendTime=getScheduledTime(now,1,hs,he,sw,tz);
+
       await supabase.from('contacts').update({next_send_at:newSendTime.toISOString()}).eq('id',contact.id);
       rescheduled++;
     }
@@ -344,29 +353,7 @@ app.put('/api/campaigns/:id',async(req,res)=>{
 
 app.delete('/api/campaigns/:id',async(req,res)=>{await supabase.from('contacts').delete().eq('campaign_id',req.params.id);await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id);await supabase.from('campaigns').delete().eq('id',req.params.id);res.json({ok:true});});
 app.post('/api/campaigns/:id/pause',async(req,res)=>{await supabase.from('campaigns').update({status:'paused',updated_at:new Date().toISOString()}).eq('id',req.params.id);res.json({ok:true});});
-app.post('/api/campaigns/:id/resume',async(req,res)=>{
-  await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);
-  const{data:campaign}=await supabase.from('campaigns').select('*,campaign_steps(*)').eq('id',req.params.id).single();
-  if(!campaign)return res.json({ok:true,requeued:0});
-  const now=new Date();const tz=campaign.timezone||'America/New_York';const sw=campaign.skip_weekends!==false;
-  // Paginate contacts — no 1000 row cap
-  let allContacts=[];let cOff=0;
-  while(true){const{data:pg}=await supabase.from('contacts').select('id,current_step,next_send_at').eq('campaign_id',req.params.id).eq('status','active').gt('current_step',0).range(cOff,cOff+999);if(!pg?.length)break;allContacts=allContacts.concat(pg);if(pg.length<1000)break;cOff+=1000;}
-  let requeued=0;
-  const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
-  for(const contact of allContacts){
-    if(contact.next_send_at&&new Date(contact.next_send_at)>now)continue;
-    const stepDef=steps.find(s=>s.step_number===contact.current_step);
-    const hs=stepDef?.send_hour_start||campaign.send_hour_start||9;
-    const he=stepDef?.send_hour_end||campaign.send_hour_end||17;
-    let sendTime=getScheduledTime(now,0,hs,he,sw,tz);
-    if(sendTime<=now)sendTime=getScheduledTime(now,1,hs,he,sw,tz);
-    await supabase.from('contacts').update({next_send_at:sendTime.toISOString()}).eq('id',contact.id);
-    requeued++;
-  }
-  await logSchedulerActivity('info',`Campaign resumed — ${requeued} contacts re-queued`,{campaign_id:req.params.id,requeued});
-  res.json({ok:true,requeued});
-});
+app.post('/api/campaigns/:id/resume',async(req,res)=>{await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);res.json({ok:true});});
 
 app.post('/api/campaigns/:id/launch',async(req,res)=>{
   const{data:campaign}=await supabase.from('campaigns').select('*, campaign_steps(*)').eq('id',req.params.id).single();
@@ -382,7 +369,9 @@ app.post('/api/campaigns/:id/launch',async(req,res)=>{
     const inbox=inboxes[i%inboxes.length];const contact=contacts[i];
     const hourStart=firstStep.send_hour_start||campaign.send_hour_start||9;const hourEnd=firstStep.send_hour_end||campaign.send_hour_end||17;
     let sendTime=getScheduledTime(now,0,hourStart,hourEnd,campaign.skip_weekends,tz);
-    if(isBefore(sendTime,now))sendTime=getScheduledTime(now,1,hourStart,hourEnd,campaign.skip_weekends,tz);
+    if(isBefore(sendTime,now))sendTime=addMinutes(now,5);
+    const randomDelay=Math.floor(Math.random()*(campaign.random_delay_max||30));
+    sendTime=addMinutes(sendTime,randomDelay);
     await supabase.from('contacts').update({assigned_inbox:inbox.email,current_step:1,next_send_at:sendTime.toISOString(),status:'active'}).eq('id',contact.id);
   }
   await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);
@@ -410,10 +399,8 @@ app.get('/api/campaigns/:id/analytics',async(req,res)=>{
   const sends=ev.filter(e=>e.type==='send').length,opens=ev.filter(e=>e.type==='open').length,clicks=ev.filter(e=>e.type==='click').length,replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
   const{data:sbs}=await supabase.from('sequence_sends').select('step_number').eq('campaign_id',cid);
   const stepBreakdown={};(sbs||[]).forEach(s=>{stepBreakdown[s.step_number]=(stepBreakdown[s.step_number]||0)+1;});
-  // Paginate contacts — no 1000 row cap
-  let allCs=[];let csOff=0;
-  while(true){const{data:pg}=await supabase.from('contacts').select('status').eq('campaign_id',cid).range(csOff,csOff+999);if(!pg?.length)break;allCs=allCs.concat(pg);if(pg.length<1000)break;csOff+=1000;}
-  const statusBreakdown={};allCs.forEach(c=>{statusBreakdown[c.status]=(statusBreakdown[c.status]||0)+1;});
+  const{data:cs}=await supabase.from('contacts').select('status').eq('campaign_id',cid);
+  const statusBreakdown={};(cs||[]).forEach(c=>{statusBreakdown[c.status]=(statusBreakdown[c.status]||0)+1;});
   res.json({totals:{sends,opens,clicks,replies},rates:{open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0'},step_breakdown:stepBreakdown,status_breakdown:statusBreakdown});
 });
 
@@ -494,57 +481,31 @@ app.get('/api/analytics',async(req,res)=>{
   else if(date==='week')fromDate=new Date(now.getTime()-7*86400000).toISOString();
   else if(date==='month')fromDate=new Date(now.getTime()-30*86400000).toISOString();
   const defaultFrom=fromDate||new Date(Date.now()-90*86400000).toISOString();
-  // Paginate through ALL email_events — no 1000 row cap
-  let allEvents=[];let evOffset=0;const EV_PAGE=1000;
-  while(true){
-    let q=supabase.from('email_events').select('type,inbox,campaign,campaign_id,contact_id,created_at').gte('created_at',defaultFrom).range(evOffset,evOffset+EV_PAGE-1);
-    if(campaign_id)q=q.eq('campaign_id',campaign_id);
-    const{data:page,error:evErr}=await q;
-    if(evErr||!page?.length)break;
-    allEvents=allEvents.concat(page);
-    if(page.length<EV_PAGE)break;
-    evOffset+=EV_PAGE;
-  }
-  const ev=allEvents;
-  const sends=ev.filter(e=>e.type==='send').length;
-  const opens=ev.filter(e=>e.type==='open').length;
-  const clicks=ev.filter(e=>e.type==='click').length;
-  const replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
-  const bounces=ev.filter(e=>e.type==='bounce').length;
-  const failed=ev.filter(e=>e.type==='send_failed').length;
-  const dailyMap={};ev.forEach(e=>{const day=e.created_at?.split('T')[0];if(!day)return;if(!dailyMap[day])dailyMap[day]={date:day,sends:0,opens:0,clicks:0,replies:0,bounces:0,failed:0};const typeKey={send:'sends',open:'opens',click:'clicks',reply:'replies',replied:'replies',bounce:'bounces',send_failed:'failed'}[e.type];if(typeKey)dailyMap[day][typeKey]=(dailyMap[day][typeKey]||0)+1;});
-  const inboxMap={};ev.forEach(e=>{if(!e.inbox)return;if(!inboxMap[e.inbox])inboxMap[e.inbox]={inbox:e.inbox,sends:0,opens:0,replies:0,bounces:0};if(e.type==='send')inboxMap[e.inbox].sends++;if(e.type==='open')inboxMap[e.inbox].opens++;if(e.type==='reply'||e.type==='replied')inboxMap[e.inbox].replies++;if(e.type==='bounce')inboxMap[e.inbox].bounces++;});
-  res.json({totals:{sends,opens,clicks,replies,bounces,failed,total:ev.length},rates:{open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0',bounce_rate:sends>0?((bounces/sends)*100).toFixed(1):'0.0'},daily:Object.values(dailyMap).sort((a,b)=>a.date.localeCompare(b.date)).slice(-30),inboxes:Object.values(inboxMap)});
+  let q=supabase.from('email_events').select('type,inbox,campaign,created_at');
+  q=q.gte('created_at',defaultFrom);
+  if(campaign_id)q=q.eq('campaign',campaign_id);
+  const{data:events}=await q;const ev=events||[];
+  const sends=ev.filter(e=>e.type==='send').length,opens=ev.filter(e=>e.type==='open').length,clicks=ev.filter(e=>e.type==='click').length,replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
+  const dailyMap={};ev.forEach(e=>{const day=e.created_at?.split('T')[0];if(!day)return;if(!dailyMap[day])dailyMap[day]={date:day,sends:0,opens:0,clicks:0,replies:0};const typeKey={send:'sends',open:'opens',click:'clicks',reply:'replies',replied:'replies'}[e.type]||e.type;dailyMap[day][typeKey]=(dailyMap[day][typeKey]||0)+1;});
+  const inboxMap={};ev.forEach(e=>{if(!e.inbox)return;if(!inboxMap[e.inbox])inboxMap[e.inbox]={inbox:e.inbox,sends:0,opens:0,replies:0};if(e.type==='send')inboxMap[e.inbox].sends++;if(e.type==='open')inboxMap[e.inbox].opens++;if(e.type==='reply'||e.type==='replied')inboxMap[e.inbox].replies++;});
+  res.json({totals:{sends,opens,clicks,replies,total:ev.length},rates:{open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0'},daily:Object.values(dailyMap).sort((a,b)=>a.date.localeCompare(b.date)).slice(-30),inboxes:Object.values(inboxMap)});
 });
 
 // REPLY RECEIVED — primary n8n reply webhook
 app.post('/api/reply-received',async(req,res)=>{
-  const{sender_email,subject,body,is_auto_reply,is_bounce,inbox}=req.body;
+  const{sender_email,subject,body,is_auto_reply,inbox}=req.body;
   const email=normalizeEmail(sender_email||'');if(!email)return res.json({ok:true});
-  const forcedBounce=is_bounce===true||is_bounce==='true';
-  const autoReply=!forcedBounce&&(is_auto_reply||detectAutoReply(subject,body));
-  const unsub=!forcedBounce&&detectUnsubscribe(body);
-  const bounce=forcedBounce||detectBounce(subject,body);
+  const autoReply=is_auto_reply||detectAutoReply(subject,body);
+  const unsub=detectUnsubscribe(body);const bounce=detectBounce(subject,body);
   const{data:contactRow}=await supabase.from('contacts').select('id,campaign_id,campaigns!inner(name,stop_on_auto_reply)').eq('email',email).limit(1).single();
   const campaignName=contactRow?.campaigns?.name||null;
-  const campaignId=contactRow?.campaign_id||null;
-  const contactId=contactRow?.id||null;
   const eventType=bounce?'bounce':unsub?'unsubscribe':autoReply?'auto_reply':'reply';
   await supabase.from('email_events').insert({type:eventType,recipient:sender_email,inbox,subject,reply_body:body,campaign:campaignName,created_at:new Date().toISOString()});
   if(bounce){
-    await addToBlacklist(email,forcedBounce?'Bounce — email does not exist or was rejected':'bounce');
-    if(contactId&&campaignId){
-      const{data:sendRecord}=await supabase.from('sequence_sends').select('id').eq('contact_id',contactId).eq('campaign_id',campaignId).in('status',['sent','pending']).order('sent_at',{ascending:false}).limit(1).single();
-      if(sendRecord){
-        await supabase.from('sequence_sends').update({status:'bounced',error_message:'Bounce — email rejected by recipient server'}).eq('id',sendRecord.id);
-        await supabase.from('email_events').delete().eq('type','send').eq('contact_id',contactId).eq('campaign_id',campaignId);
-        await supabase.from('email_events').insert({type:'bounce',recipient:email,inbox,campaign:campaignName,campaign_id:campaignId,contact_id:contactId,created_at:new Date().toISOString()});
-      }
-    }
-    await supabase.from('contacts').update({status:'bounced',next_send_at:null,finished_at:new Date().toISOString()}).eq('email',email);
-    await logSchedulerActivity('warn',`Bounce for ${email} — blacklisted and send record corrected`,{email,subject,forced:forcedBounce});
+    await addToBlacklist(email,'bounce');
+    await logSchedulerActivity('warn',`Bounce for ${email}`,{email,subject});
   }else if(unsub){
-    await addToBlacklist(email,'Unsubscribed — contact requested removal');
+    await addToBlacklist(email,'unsubscribed');
     await logSchedulerActivity('info',`Unsubscribe from ${email}`,{email});
   }else if(autoReply){
     if(contactRow?.campaigns?.stop_on_auto_reply){
@@ -557,7 +518,7 @@ app.post('/api/reply-received',async(req,res)=>{
     await supabase.from('contacts').update({status:'replied',finished_at:new Date().toISOString(),next_send_at:null}).eq('email',email);
     await logSchedulerActivity('info',`Reply from ${email} — sequence stopped`,{email,campaign:campaignName});
   }
-  res.json({ok:true,detected:{bounce,unsub,autoReply,eventType,forcedBounce}});
+  res.json({ok:true,detected:{bounce,unsub,autoReply,eventType}});
 });
 
 // ── N8N DELIVERY CONFIRMATION ─────────────────────────────────────────────────
@@ -590,31 +551,8 @@ app.post('/api/email/delivery-report',async(req,res)=>{
     await supabase.from('sequence_sends').update({status:dbStatus,error_message:reason||null}).eq('id',sendRecord.id);
   }
   if(status==='delivered'){
-    if(sendRecord){
-      await supabase.from('sequence_sends').update({status:'sent',error_message:null}).eq('id',sendRecord.id);
-      await supabase.from('email_events').insert({type:'send',recipient:cleanEmail,inbox,campaign:campaign_id,campaign_id:campaign_id,contact_id:contact_id||null,step_number:step?parseInt(step):null,send_id:sendRecord.id,created_at:new Date().toISOString()});
-    }
-    if(contact_id&&campaign_id&&step){
-      const{data:campData}=await supabase.from('campaigns').select('*,campaign_steps(*)').eq('id',campaign_id).single();
-      if(campData){
-        const campSteps=(campData.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
-        const currentStepNum=parseInt(step);
-        const stepIndex=campSteps.findIndex(s=>s.step_number===currentStepNum);
-        const nextStep=campSteps[stepIndex+1];
-        const tz=campData.timezone||'America/New_York';
-        const sw=campData.skip_weekends!==false;
-        if(nextStep){
-          const hs=nextStep.send_hour_start||campData.send_hour_start||9;
-          const he=nextStep.send_hour_end||campData.send_hour_end||17;
-          const nextSend=getScheduledTime(new Date(),nextStep.delay_days,hs,he,sw,tz);
-          await supabase.from('contacts').update({current_step:nextStep.step_number,next_send_at:nextSend.toISOString()}).eq('id',contact_id);
-        }else{
-          await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact_id);
-        }
-      }
-    }
-    await logSchedulerActivity('send',`✓ Confirmed delivery for ${cleanEmail} — contact advanced`,{email:cleanEmail,inbox,step,campaign_id});
-    return res.json({ok:true,action:'confirmed_sent',email:cleanEmail});
+    await supabase.from('email_events').insert({type:'delivered',recipient:cleanEmail,inbox,campaign:campaign_id,created_at:new Date().toISOString()});
+    return res.json({ok:true,action:'logged_delivery',email:cleanEmail});
   }
   if(status==='bounced'){
     await addToBlacklist(cleanEmail,'bounce');
@@ -668,25 +606,17 @@ async function runScheduler(manual=false){
     if(!activeCampaigns?.length){result.reason='no_active_campaigns';await logSchedulerActivity('warn','No active campaigns found.',{},runId);return result;}
     const activeCampaignIds=activeCampaigns.map(c=>c.id);
     const campaignMap=Object.fromEntries(activeCampaigns.map(c=>[c.id,c]));
-    // Fair distribution — split daily cap equally across all active campaigns
-    // so no campaign starves when multiple campaigns compete for the same inboxes
-    const perCampaignAllowance=Math.floor((dailyCap-totalToday)/activeCampaigns.length)||1;
-    const campaignSentToday={};// tracks how many sent per campaign this run
-    await logSchedulerActivity('info',`Found ${activeCampaigns.length} active campaign(s) — ${perCampaignAllowance} sends each`,{campaigns:activeCampaigns.map(c=>c.name),per_campaign:perCampaignAllowance},runId);
+    await logSchedulerActivity('info',`Found ${activeCampaigns.length} active campaign(s)`,{campaigns:activeCampaigns.map(c=>c.name)},runId);
     const now=new Date();
     const inboxCounts={};
     let batchOffset=0;
     let totalSentThisRun=0;
     const newLeadsCache={};
     // FIX: pre-fetch blacklist and replied emails as Sets — prevents N+1 queries
-    // Paginate blacklist — no 1000 row cap
-    let blRows=[];let blOff=0;
-    while(true){const{data:pg}=await supabase.from('blacklist').select('email').range(blOff,blOff+999);if(!pg?.length)break;blRows=blRows.concat(pg);if(pg.length<1000)break;blOff+=1000;}
-    const blacklistSet=new Set(blRows.map(r=>r.email));
-    // Paginate replied emails — no 1000 row cap
-    let repRows=[];let repOff=0;
-    while(true){const{data:pg}=await supabase.from('email_events').select('recipient').eq('type','reply').range(repOff,repOff+999);if(!pg?.length)break;repRows=repRows.concat(pg);if(pg.length<1000)break;repOff+=1000;}
-    const repliedSet=new Set(repRows.map(r=>normalizeEmail(r.recipient)));
+    const{data:blacklistRows}=await supabase.from('blacklist').select('email');
+    const blacklistSet=new Set((blacklistRows||[]).map(r=>r.email));
+    const{data:repliedRows}=await supabase.from('email_events').select('recipient').eq('type','reply');
+    const repliedSet=new Set((repliedRows||[]).map(r=>normalizeEmail(r.recipient)));
     await logSchedulerActivity('info',`Pre-fetched ${blacklistSet.size} blacklisted, ${repliedSet.size} replied emails`,{},runId);
     while(true){
       const dailyRemaining=dailyCap-totalToday-totalSentThisRun;
@@ -707,9 +637,6 @@ async function runScheduler(manual=false){
 
       for(const contact of batch){
         if(totalSentThisRun>=(dailyCap-totalToday))break;
-        // Fair distribution — skip if this campaign already hit its allowance today
-        campaignSentToday[contact.campaign_id]=campaignSentToday[contact.campaign_id]||0;
-        if(campaignSentToday[contact.campaign_id]>=perCampaignAllowance){result.skipped++;result.skip_reasons.campaign_allowance_reached=(result.skip_reasons.campaign_allowance_reached||0)+1;continue;}
         const campaign=campaignMap[contact.campaign_id];
         if(!campaign){result.skipped++;result.skip_reasons.campaign_not_found=(result.skip_reasons.campaign_not_found||0)+1;continue;}
         if(campaign.start_date){const sd=new Date(campaign.start_date+'T12:00:00');if(isBefore(now,sd)){result.skipped++;result.skip_reasons.campaign_not_started=(result.skip_reasons.campaign_not_started||0)+1;await logSchedulerActivity('skip',`Skipped ${contact.email} — campaign hasn't started`,{},runId);continue;}}
@@ -745,12 +672,20 @@ async function runScheduler(manual=false){
           send_id:sendId,subject
         });
 
-        // Contact stays on current step — advances in /api/email/delivery-report after confirmed delivery
-        await supabase.from('contacts').update({next_send_at:null}).eq('id',contact.id);
+        // Pre-advance contact to next step now so DB is consistent even if webhook call hangs
+        const nextStep=steps[stepIndex+1];
+        if(nextStep){
+          const shs=nextStep.send_hour_start||campaign.send_hour_start||9;
+          const she=nextStep.send_hour_end||campaign.send_hour_end||17;
+          let nextSend=getScheduledTime(now,nextStep.delay_days,shs,she,campaign.skip_weekends,tz);
+          nextSend=addMinutes(nextSend,Math.floor(Math.random()*(campaign.random_delay_max||30)));
+          await supabase.from('contacts').update({current_step:nextStep.step_number,next_send_at:nextSend.toISOString()}).eq('id',contact.id);
+        }else{
+          await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);
+        }
 
         inboxCounts[inbox]=(inboxCounts[inbox]||0)+1;
         totalSentThisRun++;
-        campaignSentToday[contact.campaign_id]=(campaignSentToday[contact.campaign_id]||0)+1;
         if(contact.current_step===1)newLeadsCache[campaign.id]=(newLeadsCache[campaign.id]||0)+1;
 
         emailBatch.push({
@@ -781,12 +716,22 @@ async function runScheduler(manual=false){
               campaign_id:m.campaign_id,contact_id:m.contact_id,
               email:m.email,inbox:m.inbox,step_number:m.step_number,
               subject:m.subject,body:m.body,
-              sent_at:new Date().toISOString(),status:'pending'
+              sent_at:new Date().toISOString(),status:'sent'
+            }))
+          );
+
+          // Bulk insert send events
+          await supabase.from('email_events').insert(
+            batchMeta.map(m=>({
+              type:'send',recipient:m.email,inbox:m.inbox,
+              campaign:m.campaign_name,campaign_id:m.campaign_id,
+              contact_id:m.contact_id,step_number:m.step_number,send_id:m.sendId,
+              subject:m.subject,created_at:new Date().toISOString()
             }))
           );
 
           result.sent+=emailBatch.length;
-          await logSchedulerActivity('send',`✓ Batch queued: ${emailBatch.length} emails dispatched to n8n — awaiting delivery confirmation`,{
+          await logSchedulerActivity('send',`✓ Batch sent: ${emailBatch.length} emails dispatched to n8n`,{
             count:emailBatch.length,
             emails:emailBatch.map(e=>e.to),
             steps:[...new Set(emailBatch.map(e=>e.step))]
@@ -828,36 +773,7 @@ async function runScheduler(manual=false){
   return result;
 }
 
-cron.schedule('*/30 * * * *',()=>runScheduler(false));
-
-// 24h PENDING CLEANUP — runs at 2am daily
-cron.schedule('0 2 * * *',async()=>{
-  console.log('[Cleanup] Running 24h pending cleanup');
-  const cutoff=new Date(Date.now()-24*60*60*1000).toISOString();
-  const{data:stale}=await supabase.from('sequence_sends').select('id,email,contact_id,campaign_id,inbox,step_number').eq('status','pending').lt('sent_at',cutoff);
-  if(!stale?.length){console.log('[Cleanup] No stale pending records');return;}
-  for(const record of stale){
-    await supabase.from('sequence_sends').update({status:'failed',error_message:'No delivery confirmation received after 24 hours'}).eq('id',record.id);
-    await supabase.from('blacklist').upsert({email:normalizeEmail(record.email),reason:'No delivery confirmation after 24h — email may be invalid or send failed',created_at:new Date().toISOString()},{onConflict:'email'});
-    await supabase.from('contacts').update({status:'bounced',next_send_at:null,finished_at:new Date().toISOString()}).eq('email',normalizeEmail(record.email));
-    await supabase.from('email_events').insert({type:'send_failed',recipient:record.email,inbox:record.inbox,campaign_id:record.campaign_id,step_number:record.step_number,created_at:new Date().toISOString()});
-    await logSchedulerActivity('warn',`Stale pending cleaned up — ${record.email}`,{email:record.email,send_id:record.id});
-  }
-  console.log(`[Cleanup] Done — ${stale.length} stale records processed`);
-});
-
-// INBOX REBALANCE — redistributes contacts across all active inboxes
-app.post('/api/campaigns/:id/rebalance-inboxes',async(req,res)=>{
-  const inboxes=await getInboxes();
-  if(!inboxes.length)return res.status(400).json({error:'No active inboxes'});
-  let allC=[];let cOff=0;
-  while(true){const{data:pg}=await supabase.from('contacts').select('id').eq('campaign_id',req.params.id).eq('status','active').gt('current_step',0).range(cOff,cOff+999);if(!pg?.length)break;allC=allC.concat(pg);if(pg.length<1000)break;cOff+=1000;}
-  if(!allC.length)return res.json({ok:true,rebalanced:0});
-  let i=0;
-  for(const contact of allC){await supabase.from('contacts').update({assigned_inbox:inboxes[i%inboxes.length].email}).eq('id',contact.id);i++;}
-  await logSchedulerActivity('info',`Inbox rebalance — ${allC.length} contacts redistributed across ${inboxes.length} inboxes`,{campaign_id:req.params.id});
-  res.json({ok:true,rebalanced:allC.length,inboxes:inboxes.map(x=>x.email)});
-});
+cron.schedule('*/5 * * * *',()=>runScheduler(false));
 
 // SCHEDULER API
 app.get('/api/scheduler/status',async(req,res)=>{
