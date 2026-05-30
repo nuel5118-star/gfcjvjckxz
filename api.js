@@ -42,5 +42,6 @@ export const api = {
   deleteInbox: (id) => req('DELETE', `/inboxes/${id}`),
   getSettings: () => req('GET', '/settings'),
   updateSettings: (data) => req('PUT', '/settings', data),
-  getAnalytics: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/analytics?${qs}`); }
+  getAnalytics: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/analytics?${qs}`); },
+  getCalculatorLeads: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/calculator-leads?${qs}`); }
 };
