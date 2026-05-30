@@ -11,6 +11,7 @@ import BlacklistPage from './BlacklistPage.jsx';
 import QueuePage from './QueuePage.jsx';
 import SettingsPage from './SettingsPage.jsx';
 import ErrorLogsPage from './ErrorLogsPage.jsx';
+import CalculatorLeadsPage from './CalculatorLeadsPage.jsx';
 
 const I = {
   grid: <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>,
@@ -22,6 +23,7 @@ const I = {
   ban: <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>,
   cog: <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>,
   logs: <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M9 12h6M9 16h6M9 8h6M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>,
+  calc: <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="10" y2="14"/><line x1="14" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="10" y2="18"/><line x1="14" y1="18" x2="16" y2="18"/></svg>,
 };
 
 function Sidebar() {
@@ -50,6 +52,8 @@ function Sidebar() {
         {nav('/inboxes', I.inbox, 'Inboxes')}
         {nav('/blacklist', I.ban, 'Blacklist')}
         {nav('/settings', I.cog, 'Settings')}
+        <div className="nav-label" style={{ marginTop: 16 }}>Leads</div>
+        {nav('/calculator-leads', I.calc, 'Calculator Leads')}
         <div className="nav-label" style={{ marginTop: 16 }}>Debug</div>
         {nav('/logs', I.logs, 'Error Logs')}
       </nav>
@@ -78,6 +82,7 @@ export default function App() {
             <Route path="/queue" element={<QueuePage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/logs" element={<ErrorLogsPage />} />
+            <Route path="/calculator-leads" element={<CalculatorLeadsPage />} />
             <Route path="*" element={
               <div style={{ padding: 64, textAlign: 'center' }}>
                 <div style={{ fontSize: 48, marginBottom: 16 }}>🔍</div>
