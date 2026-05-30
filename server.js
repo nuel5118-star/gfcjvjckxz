@@ -883,40 +883,6 @@ app.get('/api/contacts/check',async(req,res)=>{
   res.json({found:true,contact:{...contact,campaign_name:camp?.name||'Unknown',campaign_status:camp?.status||'unknown'}});
 });
 
-// CALCULATOR LEADS
-app.get('/api/calculator-leads', async (req, res) => {
-  const { table, search } = req.query;
-  const page = parseInt(req.query.page || '1');
-  const pageSize = parseInt(req.query.pageSize || '50');
-  const offset = (page - 1) * pageSize;
-
-  // Map frontend param values to real Supabase table names
-  const tableMap = {
-    missed_revenue: 'calculator_form_submissions',
-    ad_calculator:  'ad_calculator_submissions',
-  };
-
-  const realTable = tableMap[table];
-  if (!realTable) {
-    return res.status(400).json({ error: 'Invalid table name. Must be missed_revenue or ad_calculator.' });
-  }
-
-  let query = supabase
-    .from(realTable)
-    .select('*', { count: 'exact' })
-    .order('created_at', { ascending: false })
-    .range(offset, offset + pageSize - 1);
-
-  if (search && search.trim()) {
-    query = query.ilike('email', `%${search.trim()}%`);
-  }
-
-  const { data, count, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
-
-  res.json({ leads: data || [], total: count || 0, page, pageSize });
-});
-
 app.use(express.static(path.join(__dirname,'dist')));
 app.get('*',(req,res)=>{if(req.path.startsWith('/api')||req.path.startsWith('/track'))return res.status(404).json({error:'Not found'});res.sendFile(path.join(__dirname,'dist/index.html'));});
 
