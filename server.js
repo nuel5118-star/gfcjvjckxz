@@ -653,6 +653,7 @@ async function runScheduler(manual=false){
     const newLeadsCache={};
     // FIX: pre-fetch blacklist and replied emails as Sets — prevents N+1 queries
     // fetchAll ensures complete blacklist/replied sets — capped at 1000 = emails sent to wrong people
+    const blacklistRows=await fetchAll(()=>supabase.from('blacklist').select('email'));
     const blacklistSet=new Set(blacklistRows.map(r=>r.email));
     const repliedRows=await fetchAll(()=>supabase.from('email_events').select('recipient').in('type',['reply','replied']));
     const repliedSet=new Set(repliedRows.map(r=>normalizeEmail(r.recipient)));
