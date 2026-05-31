@@ -23,7 +23,7 @@ const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBR
 
 // Base URL for tracking pixel and click redirect URLs embedded into emails
 // Set APP_URL in Railway environment variables — must be your public Railway domain
-const APP_URL = (process.env.APP_URL || 'https://gfcjvjckxz-production.up.railway.app').replace(/\/$/,'');
+const APP_URL = (process.env.APP_URL || '').replace(/\/$/,'');
 const CALCULATOR_URL = 'https://botcipher.github.io/Revenue-calculator/';
 
 // SSE: connected browser clients that receive real-time log pushes
