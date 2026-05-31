@@ -24,6 +24,7 @@ const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBR
 // Base URL for tracking pixel and click redirect URLs embedded into emails
 // Set APP_URL in Railway environment variables — must be your public Railway domain
 const APP_URL = (process.env.APP_URL || 'https://gfcjvjckxz-production.up.railway.app').replace(/\/$/,'');
+const CALCULATOR_URL = 'https://botcipher.github.io/Revenue-calculator/';
 
 // SSE: connected browser clients that receive real-time log pushes
 const sseClients = new Set();
@@ -57,6 +58,9 @@ function processSpintax(text){
 function applyVariables(template,contact,customFields){
   if(!template)return '';
   const data={first_name:'',last_name:'',company:'',city:'',phone:'',business_url:'',timezone:'',...(customFields||{}),...contact};
+  // {{calculator_link}} expands to a per-contact tracked URL — injectTracking skips it (contains APP_URL)
+  const calcQ=new URLSearchParams({email:data.email||'',contact_id:data.id||'',campaign_id:data.campaign_id||''}).toString();
+  data.calculator_link=`${APP_URL}/track/calculator?${calcQ}`;
   return template.replace(/\{\{(\w+)\s*(?:\|\s*"?([^"}\n]*)?"?)?\}\}/g,(match,key,fallback)=>{
     let value=data[key]||data[key?.toLowerCase()]||'';
     if(key==='first_name'||key==='last_name')value=formatName(String(value||''));
@@ -204,6 +208,25 @@ app.get('/track/click',async(req,res)=>{
     created_at:new Date().toISOString()
   });
   res.redirect(decodeURIComponent(url));
+});
+
+// CALCULATOR CLICK TRACKING
+// Logs a 'calculator_click' event then redirects to the calculator.
+// Used via {{calculator_link}} merge tag in email templates.
+// injectTracking() skips this URL because it contains APP_URL.
+app.get('/track/calculator',async(req,res)=>{
+  const{email,contact_id,campaign_id}=req.query;
+  if(email){
+    await supabase.from('email_events').insert({
+      type:'calculator_click',
+      recipient:email,
+      contact_id:contact_id||null,
+      campaign_id:campaign_id||null,
+      clicked_url:CALCULATOR_URL,
+      created_at:new Date().toISOString()
+    }).catch(e=>console.error('[track/calculator] insert error:',e.message));
+  }
+  res.redirect(CALCULATOR_URL);
 });
 
 // FIX: /track/reply now handles bounces + stores auto-replies as 'auto_reply' type (not 'reply')
