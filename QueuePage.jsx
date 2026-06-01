@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 const BASE = '/api';
 async function req(method, path, body) {
@@ -116,13 +116,23 @@ export default function QueuePage() {
     return () => clearInterval(intervalRef.current);
   }, [autoRefresh]);
 
-  // FIX: handleTrigger now waits for the scheduler to finish and shows what happened
+  // FIX: handleTrigger handles 409 (already running) explicitly and shows what happened
   const handleTrigger = async () => {
     setTriggering(true);
     setRunResult(null);
     try {
-      const res = await req('POST', '/scheduler/run');
-      if (res.result) setRunResult(res.result);
+      const res = await fetch(`${BASE}/scheduler/run`, { method:'POST', headers:{'Content-Type':'application/json'} });
+      if (res.status === 409) {
+        setRunResult({ sent:0, skipped:0, errors:0, reason:'already_running' });
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Scheduler error: ${err.error || res.statusText}`);
+        return;
+      }
+      const data = await res.json();
+      if (data.result) setRunResult(data.result);
       await load();
       if (tab === 'logs') await loadLogs();
     } catch (e) { alert(e.message); }
@@ -156,7 +166,7 @@ export default function QueuePage() {
     catch (e) { alert(e.message); }
   };
 
-  // FIX: campaign-level force send — reschedules all contacts then runs scheduler
+  // FIX: campaign-level force send — reschedules then runs scheduler without blocking alert
   const handleForceSendCampaign = async () => {
     if (!forceSendCampaignId) return alert('Select a campaign first');
     const camp = campaigns.find(c => c.id === forceSendCampaignId);
@@ -164,7 +174,8 @@ export default function QueuePage() {
     setForceSending(true);
     try {
       const res = await req('POST', `/campaigns/${forceSendCampaignId}/send-now`);
-      alert(`✅ ${res.rescheduled} contacts rescheduled.\n\nRunning scheduler now...`);
+      // FIX: removed blocking alert() here — it caused race with cron. Just log and trigger.
+      console.log(`[ForceSend] ${res.rescheduled} contacts rescheduled`);
       await handleTrigger();
     } catch (e) { alert(e.message); }
     finally { setForceSending(false); }
@@ -176,8 +187,11 @@ export default function QueuePage() {
   };
 
   const failed = recent.filter(r => r.status === 'failed');
+  // FIX: highFailRate uses only failures from today (last 24h), not the full 1000-row rolling window
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const failedToday = failed.filter(r => new Date(r.sent_at) >= todayStart);
   const webhookAlert = status && !status.webhook_configured;
-  const highFailRate = failed.length >= 3;
+  const highFailRate = failedToday.length >= 3;
 
   const logTypeColor = { error: 'var(--danger)', warn: 'var(--warning)', send: 'var(--success)', skip: 'var(--text-muted)', info: 'var(--info)' };
   const logTypeBadge = { error: 'badge-bounced', warn: 'badge-paused', send: 'badge-active', skip: 'badge-draft', info: 'badge-active' };
@@ -216,7 +230,7 @@ export default function QueuePage() {
         )}
         {highFailRate && (
           <div className="alert alert-warning" style={{ marginBottom: 16 }}>
-            ⚠️ <strong>{failed.length} failed sends detected.</strong> Check the Failed tab and Activity Log for error details.
+            ⚠️ <strong>{failedToday.length} failed sends today.</strong> Check the Failed tab and Activity Log for error details.
           </div>
         )}
 
@@ -484,8 +498,8 @@ export default function QueuePage() {
                     </thead>
                     <tbody>
                       {logs.map(l => (
-                        <>
-                          <tr key={l.id} style={{ background: l.type === 'error' ? 'rgba(220,38,38,0.04)' : l.type === 'warn' ? 'rgba(251,191,36,0.03)' : undefined }}>
+                        <React.Fragment key={l.id}>
+                          <tr style={{ background: l.type === 'error' ? 'rgba(220,38,38,0.04)' : l.type === 'warn' ? 'rgba(251,191,36,0.03)' : undefined }}>
                             <td style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                               {new Date(l.created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                             </td>
@@ -512,7 +526,7 @@ export default function QueuePage() {
                               </td>
                             </tr>
                           )}
-                        </>
+                        </React.Fragment>
                       ))}
                     </tbody>
                   </table>
