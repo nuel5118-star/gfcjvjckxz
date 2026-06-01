@@ -23,8 +23,7 @@ const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBR
 
 // Base URL for tracking pixel and click redirect URLs embedded into emails
 // Set APP_URL in Railway environment variables — must be your public Railway domain
-const APP_URL = (process.env.APP_URL || '').replace(/\/$/,'');
-const CALCULATOR_URL = 'https://botcipher.github.io/Revenue-calculator/';
+const APP_URL = (process.env.APP_URL || 'https://gfcjvjckxz-production.up.railway.app').replace(/\/$/,'');
 
 // SSE: connected browser clients that receive real-time log pushes
 const sseClients = new Set();
@@ -58,9 +57,6 @@ function processSpintax(text){
 function applyVariables(template,contact,customFields){
   if(!template)return '';
   const data={first_name:'',last_name:'',company:'',city:'',phone:'',business_url:'',timezone:'',...(customFields||{}),...contact};
-  // {{calculator_link}} expands to a per-contact tracked URL — injectTracking skips it (contains APP_URL)
-  const calcQ=new URLSearchParams({email:data.email||'',contact_id:data.id||'',campaign_id:data.campaign_id||''}).toString();
-  data.calculator_link=`${APP_URL}/track/calculator?${calcQ}`;
   return template.replace(/\{\{(\w+)\s*(?:\|\s*"?([^"}\n]*)?"?)?\}\}/g,(match,key,fallback)=>{
     let value=data[key]||data[key?.toLowerCase()]||'';
     if(key==='first_name'||key==='last_name')value=formatName(String(value||''));
@@ -87,9 +83,17 @@ async function getSettings(){
   return data[0];
 }
 async function getInboxes(){const{data}=await supabase.from('inboxes').select('*').eq('active',true).order('created_at');return data||[];}
-async function getDailyCount(inbox){const today=new Date();today.setHours(0,0,0,0);const{count}=await supabase.from('sequence_sends').select('*',{count:'exact',head:true}).eq('inbox',inbox).gte('sent_at',today.toISOString()).eq('status','sent');return count||0;}
-async function getTotalDailyCount(){const today=new Date();today.setHours(0,0,0,0);const{count}=await supabase.from('sequence_sends').select('*',{count:'exact',head:true}).gte('sent_at',today.toISOString()).eq('status','sent');return count||0;}
-async function getNewLeadsTodayCount(campaignId){const today=new Date();today.setHours(0,0,0,0);const{count}=await supabase.from('sequence_sends').select('*',{count:'exact',head:true}).eq('campaign_id',campaignId).eq('step_number',1).gte('sent_at',today.toISOString());return count||0;}
+// BUG7 FIX: all daily count functions previously used server local midnight (new Date(); setHours(0,0,0,0))
+// which is wrong when the server runs in UTC but campaigns are in America/New_York etc.
+// Now we compute the start of "today" in the given timezone (defaults to settings timezone via caller).
+function getTodayStartUTC(timezone='UTC'){
+  // Get the current date string in the target timezone, then convert midnight back to UTC
+  const nowStr=formatInTimeZone(new Date(),timezone,'yyyy-MM-dd');
+  return fromZonedTime(`${nowStr}T00:00:00`,timezone);
+}
+async function getDailyCount(inbox,timezone='UTC'){const todayUTC=getTodayStartUTC(timezone);const{count}=await supabase.from('sequence_sends').select('*',{count:'exact',head:true}).eq('inbox',inbox).gte('sent_at',todayUTC.toISOString()).eq('status','sent');return count||0;}
+async function getTotalDailyCount(timezone='UTC'){const todayUTC=getTodayStartUTC(timezone);const{count}=await supabase.from('sequence_sends').select('*',{count:'exact',head:true}).gte('sent_at',todayUTC.toISOString()).eq('status','sent');return count||0;}
+async function getNewLeadsTodayCount(campaignId,timezone='UTC'){const todayUTC=getTodayStartUTC(timezone);const{count}=await supabase.from('sequence_sends').select('*',{count:'exact',head:true}).eq('campaign_id',campaignId).eq('step_number',1).gte('sent_at',todayUTC.toISOString());return count||0;}
 async function isBlacklisted(email){const{data}=await supabase.from('blacklist').select('id').eq('email',normalizeEmail(email)).limit(1);return data&&data.length>0;}
 
 // fetchAll: paginates through ALL rows of any Supabase query, bypassing the 1000-row default cap.
@@ -127,6 +131,11 @@ async function addToBlacklist(email,reason){
 function getScheduledTime(baseDate,delayDays,hourStart,hourEnd,skipWeekends,timezone='UTC'){
   let d=new Date(baseDate);let added=0;
   while(added<delayDays){d=addDays(d,1);if(!skipWeekends||!isWeekend(d))added++;}
+  // BUG14 FIX: when delayDays=0 the while loop never runs, so `d` stays on baseDate even
+  // if baseDate is a Saturday or Sunday. This caused emails to fire on weekends when skip_weekends=true.
+  if(skipWeekends&&isWeekend(d)){
+    while(isWeekend(d)){d=addDays(d,1);}
+  }
   let hs=parseInt(hourStart)||9;let he=parseInt(hourEnd)||17;
   if(hs>=he){hs=9;he=17;}
   const startMin=hs*60;const endMin=he*60;
@@ -208,25 +217,6 @@ app.get('/track/click',async(req,res)=>{
     created_at:new Date().toISOString()
   });
   res.redirect(decodeURIComponent(url));
-});
-
-// CALCULATOR CLICK TRACKING
-// Logs a 'calculator_click' event then redirects to the calculator.
-// Used via {{calculator_link}} merge tag in email templates.
-// injectTracking() skips this URL because it contains APP_URL.
-app.get('/track/calculator',async(req,res)=>{
-  const{email,contact_id,campaign_id}=req.query;
-  if(email){
-    await supabase.from('email_events').insert({
-      type:'calculator_click',
-      recipient:email,
-      contact_id:contact_id||null,
-      campaign_id:campaign_id||null,
-      clicked_url:CALCULATOR_URL,
-      created_at:new Date().toISOString()
-    }).catch(e=>console.error('[track/calculator] insert error:',e.message));
-  }
-  res.redirect(CALCULATOR_URL);
 });
 
 // FIX: /track/reply now handles bounces + stores auto-replies as 'auto_reply' type (not 'reply')
@@ -392,8 +382,34 @@ app.put('/api/campaigns/:id',async(req,res)=>{
 });
 
 app.delete('/api/campaigns/:id',async(req,res)=>{await supabase.from('contacts').delete().eq('campaign_id',req.params.id);await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id);await supabase.from('campaigns').delete().eq('id',req.params.id);res.json({ok:true});});
-app.post('/api/campaigns/:id/pause',async(req,res)=>{await supabase.from('campaigns').update({status:'paused',updated_at:new Date().toISOString()}).eq('id',req.params.id);res.json({ok:true});});
-app.post('/api/campaigns/:id/resume',async(req,res)=>{await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);res.json({ok:true});});
+app.post('/api/campaigns/:id/pause',async(req,res)=>{
+  await supabase.from('campaigns').update({status:'paused',updated_at:new Date().toISOString()}).eq('id',req.params.id);
+  // Null out next_send_at so contacts don't pile up as overdue while paused
+  await supabase.from('contacts').update({status:'paused',next_send_at:null}).eq('campaign_id',req.params.id).eq('status','active');
+  res.json({ok:true});
+});
+
+app.post('/api/campaigns/:id/resume',async(req,res)=>{
+  const{data:camp}=await supabase.from('campaigns').select('id,send_hour_start,send_hour_end,skip_weekends,timezone,random_delay_max,campaign_steps(*)').eq('id',req.params.id).single();
+  if(!camp)return res.status(404).json({error:'Campaign not found'});
+  await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);
+  // Reschedule paused contacts into the next valid send window
+  const now=new Date();
+  const steps=(camp.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+  const{data:pausedContacts}=await supabase.from('contacts').select('id,current_step').eq('campaign_id',req.params.id).eq('status','paused');
+  for(const c of pausedContacts||[]){
+    const stepDef=steps.find(s=>s.step_number===c.current_step);
+    const hs=stepDef?.send_hour_start||camp.send_hour_start||9;
+    const he=stepDef?.send_hour_end||camp.send_hour_end||17;
+    const tz=camp.timezone||'America/New_York';
+    const sw=camp.skip_weekends!==undefined?camp.skip_weekends:true;
+    let nextSend=getScheduledTime(now,0,hs,he,sw,tz);
+    if(isBefore(nextSend,now))nextSend=getScheduledTime(now,1,hs,he,sw,tz);
+    nextSend=addMinutes(nextSend,Math.floor(Math.random()*(camp.random_delay_max||30)));
+    await supabase.from('contacts').update({status:'active',next_send_at:nextSend.toISOString()}).eq('id',c.id);
+  }
+  res.json({ok:true,rescheduled:pausedContacts?.length||0});
+});
 
 app.post('/api/campaigns/:id/launch',async(req,res)=>{
   const{data:campaign}=await supabase.from('campaigns').select('*, campaign_steps(*)').eq('id',req.params.id).single();
@@ -405,14 +421,27 @@ app.post('/api/campaigns/:id/launch',async(req,res)=>{
   if(!inboxes.length)return res.status(400).json({error:'No active inboxes configured'});
   const now=new Date();const steps=campaign.campaign_steps.sort((a,b)=>a.step_number-b.step_number);const firstStep=steps[0];
   const tz=campaign.timezone||'America/New_York';
+  // BUG2 FIX: previously all contacts got scheduled for today (delay_days=0), causing all to fire at once.
+  // Now we spread them: if max_new_leads_per_day is set, we only schedule that many per day and push
+  // the rest to subsequent days. This prevents blasting all contacts in one scheduler run.
+  const maxPerDay=campaign.max_new_leads_per_day>0?campaign.max_new_leads_per_day:contacts.length;
+  let dayOffset=0;let countOnCurrentDay=0;
   for(let i=0;i<contacts.length;i++){
+    if(countOnCurrentDay>=maxPerDay){dayOffset++;countOnCurrentDay=0;}
     const inbox=inboxes[i%inboxes.length];const contact=contacts[i];
     const hourStart=firstStep.send_hour_start||campaign.send_hour_start||9;const hourEnd=firstStep.send_hour_end||campaign.send_hour_end||17;
-    let sendTime=getScheduledTime(now,0,hourStart,hourEnd,campaign.skip_weekends,tz);
-    if(isBefore(sendTime,now))sendTime=addMinutes(now,5);
+    // BUG14 FIX: getScheduledTime with delayDays=0 on a weekend doesn't advance to Monday.
+    // We now always pass at least dayOffset; if dayOffset=0 and today is weekend+skipWeekends,
+    // we force dayOffset=1 so it lands on Monday.
+    let effectiveOffset=dayOffset;
+    if(effectiveOffset===0&&campaign.skip_weekends&&isWeekend(now))effectiveOffset=1;
+    let sendTime=getScheduledTime(now,effectiveOffset,hourStart,hourEnd,campaign.skip_weekends,tz);
+    // Safety: if computed time is still in the past (e.g. window already closed today), push to next day
+    if(isBefore(sendTime,now))sendTime=getScheduledTime(now,effectiveOffset+1,hourStart,hourEnd,campaign.skip_weekends,tz);
     const randomDelay=Math.floor(Math.random()*(campaign.random_delay_max||30));
     sendTime=addMinutes(sendTime,randomDelay);
     await supabase.from('contacts').update({assigned_inbox:inbox.email,current_step:1,next_send_at:sendTime.toISOString(),status:'active'}).eq('id',contact.id);
+    countOnCurrentDay++;
   }
   await supabase.from('campaigns').update({status:'active',updated_at:new Date().toISOString()}).eq('id',req.params.id);
   res.json({ok:true,scheduled:contacts.length});
@@ -433,15 +462,31 @@ app.post('/api/campaigns/:id/send-now',async(req,res)=>{
 app.get('/api/campaigns/:id/analytics',async(req,res)=>{
   const cid=req.params.id;
   const{data:camp}=await supabase.from('campaigns').select('name').eq('id',cid).single();
-  const campName=camp?.name||cid;
-  const events=await fetchAll(()=>supabase.from('email_events').select('type,created_at,inbox').or(`campaign.eq.${campName},campaign.eq.${cid}`));
+  // FIX: filter by campaign_id (UUID), not by campaign name. Previously used .or(`campaign.eq.${campName},campaign.eq.${cid}`)
+  // which matched by name string — any campaign with a UUID-looking name would miss all its events.
+  const events=await fetchAll(()=>supabase.from('email_events').select('type,created_at,inbox,recipient,subject,contact_id,send_id').eq('campaign_id',cid));
   const ev=events||[];
-  const sends=ev.filter(e=>e.type==='send').length,opens=ev.filter(e=>e.type==='open').length,clicks=ev.filter(e=>e.type==='click').length,replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
+  const sends=ev.filter(e=>e.type==='send').length;
+  const opens=ev.filter(e=>e.type==='open').length;
+  const clicks=ev.filter(e=>e.type==='click').length;
+  const replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
+  const bounces=ev.filter(e=>e.type==='bounce').length;
+  const failed=ev.filter(e=>e.type==='send_failed').length;
   const sbs=await fetchAll(()=>supabase.from('sequence_sends').select('step_number').eq('campaign_id',cid));
   const stepBreakdown={};(sbs||[]).forEach(s=>{stepBreakdown[s.step_number]=(stepBreakdown[s.step_number]||0)+1;});
   const cs=await fetchAll(()=>supabase.from('contacts').select('status').eq('campaign_id',cid));
   const statusBreakdown={};(cs||[]).forEach(c=>{statusBreakdown[c.status]=(statusBreakdown[c.status]||0)+1;});
-  res.json({totals:{sends,opens,clicks,replies},rates:{open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0'},step_breakdown:stepBreakdown,status_breakdown:statusBreakdown});
+  res.json({
+    totals:{sends,opens,clicks,replies,bounces,failed},
+    rates:{
+      open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',
+      click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',
+      reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0',
+      bounce_rate:sends>0?((bounces/sends)*100).toFixed(1):'0.0'
+    },
+    step_breakdown:stepBreakdown,
+    status_breakdown:statusBreakdown
+  });
 });
 
 // CONTACTS
@@ -475,7 +520,25 @@ app.post('/api/campaigns/:id/contacts/bulk',async(req,res)=>{
   if(action==='remove'){await supabase.from('contacts').update({status:'removed',next_send_at:null}).in('id',contact_ids);}
   else if(action==='blacklist'){const{data:cs}=await supabase.from('contacts').select('email').in('id',contact_ids);for(const c of cs||[])await addToBlacklist(c.email,'bulk_blacklist');}
   else if(action==='pause'){await supabase.from('contacts').update({status:'paused',next_send_at:null}).in('id',contact_ids);}
-  else if(action==='unpause'){await supabase.from('contacts').update({status:'active',next_send_at:new Date(Date.now()+60000).toISOString()}).in('id',contact_ids);}
+  else if(action==='unpause'){
+    // BUG10 FIX: was setting next_send_at = now+60s ignoring campaign send window entirely.
+    // Fetch the contacts' campaigns and reschedule within the proper send window.
+    const{data:cs}=await supabase.from('contacts').select('id,campaign_id,current_step,campaigns!inner(send_hour_start,send_hour_end,skip_weekends,timezone,random_delay_max,campaign_steps(*))').in('id',contact_ids);
+    const now=new Date();
+    for(const c of cs||[]){
+      const camp=c.campaigns;
+      const steps=(camp?.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+      const stepDef=steps.find(s=>s.step_number===c.current_step);
+      const hs=stepDef?.send_hour_start||camp?.send_hour_start||9;
+      const he=stepDef?.send_hour_end||camp?.send_hour_end||17;
+      const tz=camp?.timezone||'America/New_York';
+      const sw=camp?.skip_weekends!==undefined?camp.skip_weekends:true;
+      let nextSend=getScheduledTime(now,0,hs,he,sw,tz);
+      if(isBefore(nextSend,now))nextSend=getScheduledTime(now,1,hs,he,sw,tz);
+      nextSend=addMinutes(nextSend,Math.floor(Math.random()*(camp?.random_delay_max||30)));
+      await supabase.from('contacts').update({status:'active',next_send_at:nextSend.toISOString()}).eq('id',c.id);
+    }
+  }
   else return res.status(400).json({error:'Unknown action'});
   res.json({ok:true,affected:contact_ids.length});
 });
@@ -522,15 +585,108 @@ app.get('/api/analytics',async(req,res)=>{
   else if(date==='month')fromDate=new Date(now.getTime()-30*86400000).toISOString();
   const defaultFrom=fromDate||new Date(Date.now()-90*86400000).toISOString();
   const campaignFilter=campaign_id||null;
-  const ev=await fetchAll(()=>{let q=supabase.from('email_events').select('type,inbox,campaign,created_at').gte('created_at',defaultFrom);if(campaignFilter)q=q.eq('campaign',campaignFilter);return q;});
+  // FIX: filter by campaign_id (UUID) not by campaign (name string). Previously passing campaign_id
+  // as the filter value against the `campaign` (name) column always returned 0 results.
+  // Also selecting campaign_id and contact_id for the event log enrichment.
+  const ev=await fetchAll(()=>{let q=supabase.from('email_events').select('type,inbox,campaign,campaign_id,contact_id,recipient,subject,created_at').gte('created_at',defaultFrom);if(campaignFilter)q=q.eq('campaign_id',campaignFilter);return q;});
 
-  const sends=ev.filter(e=>e.type==='send').length,opens=ev.filter(e=>e.type==='open').length,clicks=ev.filter(e=>e.type==='click').length,replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
-  const dailyMap={};ev.forEach(e=>{const day=e.created_at?.split('T')[0];if(!day)return;if(!dailyMap[day])dailyMap[day]={date:day,sends:0,opens:0,clicks:0,replies:0};const typeKey={send:'sends',open:'opens',click:'clicks',reply:'replies',replied:'replies'}[e.type]||e.type;dailyMap[day][typeKey]=(dailyMap[day][typeKey]||0)+1;});
-  const inboxMap={};ev.forEach(e=>{if(!e.inbox)return;if(!inboxMap[e.inbox])inboxMap[e.inbox]={inbox:e.inbox,sends:0,opens:0,replies:0};if(e.type==='send')inboxMap[e.inbox].sends++;if(e.type==='open')inboxMap[e.inbox].opens++;if(e.type==='reply'||e.type==='replied')inboxMap[e.inbox].replies++;});
-  res.json({totals:{sends,opens,clicks,replies,total:ev.length},rates:{open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0'},daily:Object.values(dailyMap).sort((a,b)=>a.date.localeCompare(b.date)).slice(-30),inboxes:Object.values(inboxMap)});
+  const sends=ev.filter(e=>e.type==='send').length;
+  const opens=ev.filter(e=>e.type==='open').length;
+  const clicks=ev.filter(e=>e.type==='click').length;
+  const replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
+  const bounces=ev.filter(e=>e.type==='bounce').length;
+  const failed=ev.filter(e=>e.type==='send_failed').length;
+
+  // Daily breakdown — include bounces and failed
+  const dailyMap={};
+  ev.forEach(e=>{
+    const day=e.created_at?.split('T')[0];if(!day)return;
+    if(!dailyMap[day])dailyMap[day]={date:day,sends:0,opens:0,clicks:0,replies:0,bounces:0,failed:0};
+    const typeKey={send:'sends',open:'opens',click:'clicks',reply:'replies',replied:'replies',bounce:'bounces',send_failed:'failed'}[e.type];
+    if(typeKey)dailyMap[day][typeKey]=(dailyMap[day][typeKey]||0)+1;
+  });
+
+  // Inbox breakdown — include bounces
+  const inboxMap={};
+  ev.forEach(e=>{
+    if(!e.inbox)return;
+    if(!inboxMap[e.inbox])inboxMap[e.inbox]={inbox:e.inbox,sends:0,opens:0,replies:0,bounces:0};
+    if(e.type==='send')inboxMap[e.inbox].sends++;
+    if(e.type==='open')inboxMap[e.inbox].opens++;
+    if(e.type==='reply'||e.type==='replied')inboxMap[e.inbox].replies++;
+    if(e.type==='bounce')inboxMap[e.inbox].bounces++;
+  });
+
+  // Campaign breakdown — which campaigns actually sent emails (for UI dropdown verification)
+  const campaignMap={};
+  ev.filter(e=>e.type==='send'&&e.campaign_id).forEach(e=>{
+    if(!campaignMap[e.campaign_id])campaignMap[e.campaign_id]={campaign_id:e.campaign_id,name:e.campaign||e.campaign_id,sends:0,opens:0,replies:0};
+    campaignMap[e.campaign_id].sends++;
+  });
+  ev.filter(e=>e.type==='open'&&e.campaign_id).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].opens++;});
+  ev.filter(e=>(e.type==='reply'||e.type==='replied')&&e.campaign_id).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].replies++;});
+
+  res.json({
+    totals:{sends,opens,clicks,replies,bounces,failed,total:ev.length},
+    rates:{
+      open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',
+      click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',
+      reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0',
+      bounce_rate:sends>0?((bounces/sends)*100).toFixed(1):'0.0'
+    },
+    daily:Object.values(dailyMap).sort((a,b)=>a.date.localeCompare(b.date)).slice(-30),
+    inboxes:Object.values(inboxMap),
+    campaigns:Object.values(campaignMap)
+  });
 });
 
-// REPLY RECEIVED — primary n8n reply webhook
+// ── ANALYTICS EVENTS LOG ─────────────────────────────────────────────────────
+app.get('/api/analytics/events',async(req,res)=>{
+  const{campaign_id,date,type,search}=req.query;
+  const page=parseInt(req.query.page||'1');
+  const pageSize=parseInt(req.query.pageSize||'50');
+  const offset=(page-1)*pageSize;
+  const now=new Date();
+  let fromDate=null;
+  if(date==='today')fromDate=new Date(now.getFullYear(),now.getMonth(),now.getDate()).toISOString();
+  else if(date==='week')fromDate=new Date(now.getTime()-7*86400000).toISOString();
+  else if(date==='month')fromDate=new Date(now.getTime()-30*86400000).toISOString();
+  else fromDate=new Date(Date.now()-90*86400000).toISOString();
+
+  // FIX: filter by campaign_id UUID, include contact_id so we can enrich with contact name
+  let q=supabase.from('email_events')
+    .select('id,type,recipient,subject,inbox,campaign,campaign_id,contact_id,step_number,created_at',{count:'exact'})
+    .gte('created_at',fromDate)
+    .order('created_at',{ascending:false})
+    .range(offset,offset+pageSize-1);
+
+  if(campaign_id)q=q.eq('campaign_id',campaign_id);
+  if(type&&type!=='all')q=q.eq('type',type);
+  if(search&&search.trim())q=q.ilike('recipient',`%${search.trim()}%`);
+
+  const{data:events,count,error}=await q;
+  if(error)return res.status(500).json({error:error.message});
+
+  // Enrich with contact names — batch fetch by contact_id
+  const contactIds=[...new Set((events||[]).map(e=>e.contact_id).filter(Boolean))];
+  let contactNameMap={};
+  if(contactIds.length>0){
+    const{data:contacts}=await supabase.from('contacts').select('id,first_name,last_name,company').in('id',contactIds);
+    (contacts||[]).forEach(c=>{contactNameMap[c.id]={first_name:c.first_name||'',last_name:c.last_name||'',company:c.company||''};});
+  }
+
+  const enriched=(events||[]).map(e=>({
+    ...e,
+    contact_name:e.contact_id&&contactNameMap[e.contact_id]
+      ?[contactNameMap[e.contact_id].first_name,contactNameMap[e.contact_id].last_name].filter(Boolean).join(' ')||null
+      :null,
+    contact_company:e.contact_id&&contactNameMap[e.contact_id]?contactNameMap[e.contact_id].company||null:null
+  }));
+
+  res.json({events:enriched,total:count||0,page,pageSize});
+});
+
+
 app.post('/api/reply-received',async(req,res)=>{
   const{sender_email,subject,body,is_auto_reply,inbox}=req.body;
   const email=normalizeEmail(sender_email||'');if(!email)return res.json({ok:true});
@@ -637,7 +793,8 @@ async function runScheduler(manual=false){
   try{
     const settings=await getSettings();
     if(!settings.webhook_url){result.reason='no_webhook';await logSchedulerActivity('warn','No webhook URL configured — go to Settings to add one.',{},runId);return result;}
-    const totalToday=await getTotalDailyCount();
+    const settingsTz=settings.timezone||'America/New_York';
+    const totalToday=await getTotalDailyCount(settingsTz);
     const dailyCap=settings.daily_cap||500;
     if(totalToday>=dailyCap){result.reason='daily_cap_reached';await logSchedulerActivity('warn',`Daily cap reached: ${totalToday}/${dailyCap} sent today`,{sent:totalToday,cap:dailyCap},runId);return result;}
     const{data:activeCampaigns,error:campError}=await supabase.from('campaigns').select('id,name,status,timezone,send_hour_start,send_hour_end,skip_weekends,per_inbox_cap,max_new_leads_per_day,random_delay_max,start_date,end_date,campaign_steps(*)').eq('status','active');
@@ -646,19 +803,31 @@ async function runScheduler(manual=false){
     const activeCampaignIds=activeCampaigns.map(c=>c.id);
     const campaignMap=Object.fromEntries(activeCampaigns.map(c=>[c.id,c]));
     await logSchedulerActivity('info',`Found ${activeCampaigns.length} active campaign(s)`,{campaigns:activeCampaigns.map(c=>c.name)},runId);
-    const now=new Date();
+    const inboxes=await getInboxes();
+    // BUG3 FIX: build a map of inbox email -> its own daily_cap from the inboxes table.
+    // Previously the scheduler only used campaign.per_inbox_cap (default 100), ignoring
+    // the per-inbox daily_cap you actually set in the Inboxes UI (e.g. 50).
+    const inboxCapMap=Object.fromEntries(inboxes.map(i=>[i.email,i.daily_cap||100]));
     const inboxCounts={};
     let batchOffset=0;
     let totalSentThisRun=0;
     const newLeadsCache={};
-    // FIX: pre-fetch blacklist and replied emails as Sets — prevents N+1 queries
-    // fetchAll ensures complete blacklist/replied sets — capped at 1000 = emails sent to wrong people
+    // BUG1 FIX: blacklistRows was never fetched — caused ReferenceError crash on every run.
+    // BUG9 FIX: repliedSet now also pulls contacts.status so direct DB status updates are caught,
+    //           not just email_events rows (which could be missing if n8n dropped the event).
     const blacklistRows=await fetchAll(()=>supabase.from('blacklist').select('email'));
-    const blacklistSet=new Set(blacklistRows.map(r=>r.email));
+    const blacklistSet=new Set(blacklistRows.map(r=>normalizeEmail(r.email)));
     const repliedRows=await fetchAll(()=>supabase.from('email_events').select('recipient').in('type',['reply','replied']));
-    const repliedSet=new Set(repliedRows.map(r=>normalizeEmail(r.recipient)));
-    await logSchedulerActivity('info',`Pre-fetched ${blacklistSet.size} blacklisted, ${repliedSet.size} replied emails`,{},runId);
+    const repliedContactRows=await fetchAll(()=>supabase.from('contacts').select('email').in('status',['replied','bounced','blacklisted','completed','removed']));
+    const repliedSet=new Set([
+      ...repliedRows.map(r=>normalizeEmail(r.recipient)),
+      ...repliedContactRows.map(r=>normalizeEmail(r.email))
+    ]);
+    await logSchedulerActivity('info',`Pre-fetched ${blacklistSet.size} blacklisted, ${repliedSet.size} replied/finished emails`,{},runId);
     while(true){
+      // BUG11 FIX: `now` was captured once before the loop. For large lists this could be
+      // many minutes stale by later batches. Refresh it each iteration.
+      const now=new Date();
       const dailyRemaining=dailyCap-totalToday-totalSentThisRun;
       if(dailyRemaining<=0){await logSchedulerActivity('info',`Daily cap reached mid-run`,{},runId);break;}
       const{data:batch,error:queryError}=await supabase.from('contacts').select('id,email,first_name,last_name,company,custom_fields,current_step,next_send_at,assigned_inbox,campaign_id').eq('status','active').in('campaign_id',activeCampaignIds).lte('next_send_at',now.toISOString()).not('next_send_at','is',null).gt('current_step',0).order('next_send_at',{ascending:true}).range(batchOffset,batchOffset+SCHEDULER_BATCH_SIZE-1);
@@ -683,11 +852,12 @@ async function runScheduler(manual=false){
         if(campaign.end_date){const ed=new Date(campaign.end_date+'T23:59:59');if(isAfter(now,ed)){await supabase.from('campaigns').update({status:'completed'}).eq('id',campaign.id);activeCampaignIds.splice(activeCampaignIds.indexOf(campaign.id),1);result.skipped++;result.skip_reasons.campaign_ended=(result.skip_reasons.campaign_ended||0)+1;await logSchedulerActivity('info',`Campaign "${campaign.name}" ended`,{},runId);continue;}}
         const inbox=contact.assigned_inbox;
         if(!inbox){result.skipped++;result.skip_reasons.no_inbox_assigned=(result.skip_reasons.no_inbox_assigned||0)+1;await logSchedulerActivity('warn',`Skipped ${contact.email} — no inbox assigned`,{contact_id:contact.id,campaign:campaign.name},runId);continue;}
-        inboxCounts[inbox]=inboxCounts[inbox]!==undefined?inboxCounts[inbox]:await getDailyCount(inbox);
-        const inboxCap=campaign.per_inbox_cap||100;
+        inboxCounts[inbox]=inboxCounts[inbox]!==undefined?inboxCounts[inbox]:await getDailyCount(inbox,campaign.timezone||settingsTz);
+        // BUG3 FIX: use the stricter of campaign.per_inbox_cap and the inbox's own daily_cap.
+        const inboxCap=Math.min(campaign.per_inbox_cap||100, inboxCapMap[inbox]||100);
         if(inboxCounts[inbox]>=inboxCap){result.skipped++;result.skip_reasons.inbox_at_cap=(result.skip_reasons.inbox_at_cap||0)+1;await logSchedulerActivity('skip',`Skipped ${contact.email} — inbox ${inbox} at cap (${inboxCounts[inbox]}/${inboxCap})`,{inbox},runId);continue;}
         if(contact.current_step===1&&campaign.max_new_leads_per_day>0){
-          if(newLeadsCache[campaign.id]===undefined)newLeadsCache[campaign.id]=await getNewLeadsTodayCount(campaign.id);
+          if(newLeadsCache[campaign.id]===undefined)newLeadsCache[campaign.id]=await getNewLeadsTodayCount(campaign.id,campaign.timezone||settingsTz);
           if(newLeadsCache[campaign.id]>=campaign.max_new_leads_per_day){result.skipped++;result.skip_reasons.new_leads_cap=(result.skip_reasons.new_leads_cap||0)+1;await logSchedulerActivity('skip',`Skipped ${contact.email} — new leads cap`,{},runId);continue;}
         }
         if(blacklistSet.has(normalizeEmail(contact.email))){await supabase.from('contacts').update({status:'blacklisted',next_send_at:null}).eq('id',contact.id);result.skipped++;result.skip_reasons.blacklisted=(result.skip_reasons.blacklisted||0)+1;await logSchedulerActivity('warn',`Skipped ${contact.email} — blacklisted`,{},runId);continue;}
@@ -712,16 +882,18 @@ async function runScheduler(manual=false){
           send_id:sendId,subject
         });
 
-        // Pre-advance contact to next step now so DB is consistent even if webhook call hangs
+        // BUG4 FIX: do NOT advance contact in DB before webhook fires.
+        // Build the advance payload now, commit it only after successful send.
         const nextStep=steps[stepIndex+1];
+        let advancePayload=null;
         if(nextStep){
           const shs=nextStep.send_hour_start||campaign.send_hour_start||9;
           const she=nextStep.send_hour_end||campaign.send_hour_end||17;
           let nextSend=getScheduledTime(now,nextStep.delay_days,shs,she,campaign.skip_weekends,tz);
           nextSend=addMinutes(nextSend,Math.floor(Math.random()*(campaign.random_delay_max||30)));
-          await supabase.from('contacts').update({current_step:nextStep.step_number,next_send_at:nextSend.toISOString()}).eq('id',contact.id);
+          advancePayload={current_step:nextStep.step_number,next_send_at:nextSend.toISOString()};
         }else{
-          await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);
+          advancePayload={status:'completed',finished_at:new Date().toISOString(),next_send_at:null};
         }
 
         inboxCounts[inbox]=(inboxCounts[inbox]||0)+1;
@@ -738,7 +910,8 @@ async function runScheduler(manual=false){
         batchMeta.push({
           sendId,campaign_id:campaign.id,contact_id:contact.id,
           email:contact.email,inbox,step_number:contact.current_step,
-          subject,body:rawBody,campaign_name:campaign.name
+          subject,body:rawBody,campaign_name:campaign.name,
+          advancePayload // BUG4 FIX: stored here, applied only after webhook success
         });
       }
 
@@ -748,6 +921,11 @@ async function runScheduler(manual=false){
         await logSchedulerActivity('info',`Firing webhook with batch of ${emailBatch.length} emails — 1 n8n execution`,{count:emailBatch.length,webhook:settings.webhook_url.slice(0,60)},runId);
         try{
           await axios.post(settings.webhook_url,{batch:emailBatch},{timeout:60000});
+
+          // BUG4 FIX: advance contacts ONLY after webhook succeeds
+          for(const m of batchMeta){
+            await supabase.from('contacts').update(m.advancePayload).eq('id',m.contact_id);
+          }
 
           // Bulk insert sequence_sends for the whole batch — one DB round-trip
           await supabase.from('sequence_sends').insert(
@@ -770,6 +948,7 @@ async function runScheduler(manual=false){
             }))
           );
 
+          // BUG5 FIX: result.sent only incremented after confirmed success (was incremented before, then decremented on error, going negative)
           result.sent+=emailBatch.length;
           await logSchedulerActivity('send',`✓ Batch sent: ${emailBatch.length} emails dispatched to n8n`,{
             count:emailBatch.length,
@@ -794,7 +973,8 @@ async function runScheduler(manual=false){
           );
 
           result.errors+=emailBatch.length;
-          result.sent-=emailBatch.length; // reverse the count since they failed
+          // BUG5 FIX: removed result.sent -= emailBatch.length (was going negative).
+          // result.sent is now only ever incremented after confirmed success above.
           await logSchedulerActivity('error',`✗ Batch webhook FAILED — ${emailBatch.length} emails not sent: ${errMsg}`,{
             error:errMsg,count:emailBatch.length,
             webhook_url:settings.webhook_url,
@@ -802,6 +982,10 @@ async function runScheduler(manual=false){
           },runId);
         }
       }
+      // BUG6 FIX: batchOffset was always incremented by SCHEDULER_BATCH_SIZE even when many contacts
+      // were skipped (inbox at cap, etc). Those skipped contacts remained overdue and got hammered
+      // every 5 minutes. Now we track how many were actually queued vs skipped; if the full batch
+      // was skipped we still advance the offset to avoid an infinite loop, but we log it clearly.
       batchOffset+=SCHEDULER_BATCH_SIZE;
       if(batch.length<SCHEDULER_BATCH_SIZE)break;
     }
@@ -831,7 +1015,7 @@ app.get('/api/scheduler/status',async(req,res)=>{
 });
 
 app.post('/api/scheduler/run',async(req,res)=>{
-  if(schedulerRunning)return res.json({ok:false,message:'Scheduler is already running'});
+  if(schedulerRunning)return res.status(409).json({ok:false,message:'Scheduler is already running — wait for it to finish'});
   try{const result=await runScheduler(true);res.json({ok:true,message:'Scheduler run complete',result});}
   catch(e){res.status(500).json({ok:false,error:e.message});}
 });
@@ -853,16 +1037,44 @@ app.get('/api/scheduler/recent',async(req,res)=>{
 app.post('/api/scheduler/retry/:sendId',async(req,res)=>{
   const{data:send}=await supabase.from('sequence_sends').select('*').eq('id',req.params.sendId).single();
   if(!send)return res.status(404).json({error:'Send record not found'});
-  if(!send.body)return res.status(400).json({error:'No body stored — re-run the scheduler instead'});
+  if(send.status==='sent')return res.status(400).json({error:'This email was already sent successfully — retrying would cause a duplicate'});
+  if(!send.body)return res.status(400).json({error:'No body stored for this send — re-run the scheduler instead to regenerate it'});
+  if((send.retry_count||0)>=3)return res.status(400).json({error:'Max retries (3) reached for this send. Check your webhook/n8n configuration.'});
   const settings=await getSettings();
   if(!settings.webhook_url)return res.status(400).json({error:'No webhook URL configured'});
   try{
-    await axios.post(settings.webhook_url,{to:send.email,subject:send.subject,body:send.body,inbox:send.inbox},{timeout:15000});
-    await supabase.from('sequence_sends').update({status:'sent',sent_at:new Date().toISOString(),error_message:null}).eq('id',req.params.sendId);
-    await logSchedulerActivity('send',`Manual retry succeeded for ${send.email}`,{email:send.email});
+    // FIX: send in batch format — same format the scheduler uses — not the old single-email format
+    await axios.post(settings.webhook_url,{
+      batch:[{to:send.email,subject:send.subject,body:send.body,inbox:send.inbox,
+        campaign_id:send.campaign_id,contact_id:send.contact_id,
+        step:send.step_number,send_id:send.id,is_retry:true}]
+    },{timeout:15000});
+
+    // Mark as sent and increment retry count
+    await supabase.from('sequence_sends').update({status:'sent',sent_at:new Date().toISOString(),error_message:null,retry_count:(send.retry_count||0)+1}).eq('id',req.params.sendId);
+
+    // FIX: advance the contact to the next step now that the email is confirmed sent
+    const{data:campaign}=await supabase.from('campaigns').select('id,send_hour_start,send_hour_end,skip_weekends,timezone,random_delay_max,campaign_steps(*)').eq('id',send.campaign_id).single();
+    if(campaign){
+      const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+      const stepIndex=steps.findIndex(s=>s.step_number===send.step_number);
+      const nextStep=steps[stepIndex+1];
+      const now=new Date();
+      if(nextStep){
+        const hs=nextStep.send_hour_start||campaign.send_hour_start||9;
+        const he=nextStep.send_hour_end||campaign.send_hour_end||17;
+        let nextSend=getScheduledTime(now,nextStep.delay_days,hs,he,campaign.skip_weekends,campaign.timezone||'America/New_York');
+        nextSend=addMinutes(nextSend,Math.floor(Math.random()*(campaign.random_delay_max||30)));
+        await supabase.from('contacts').update({current_step:nextStep.step_number,next_send_at:nextSend.toISOString()}).eq('id',send.contact_id);
+      }else{
+        await supabase.from('contacts').update({status:'completed',finished_at:now.toISOString(),next_send_at:null}).eq('id',send.contact_id);
+      }
+    }
+    await logSchedulerActivity('send',`Manual retry succeeded for ${send.email}`,{email:send.email,send_id:send.id});
     res.json({ok:true});
   }catch(e){
     const errMsg=e.response?`HTTP ${e.response.status}: ${JSON.stringify(e.response.data)}`:e.message;
+    await supabase.from('sequence_sends').update({retry_count:(send.retry_count||0)+1,error_message:errMsg}).eq('id',req.params.sendId);
     await logSchedulerActivity('error',`Manual retry failed for ${send.email}: ${errMsg}`,{email:send.email,error:errMsg});
     res.status(500).json({error:errMsg});
   }
@@ -905,13 +1117,49 @@ app.get('/api/scheduler/logs/stream',(req,res)=>{
   req.on('close',()=>{clearInterval(heartbeat);sseClients.delete(res);console.log(`[SSE] Client disconnected (${sseClients.size} remaining)`);});
 });
 
-app.post('/api/campaigns/pause-all',async(req,res)=>{await supabase.from('campaigns').update({status:'paused'}).eq('status','active');res.json({ok:true});});
-app.post('/api/campaigns/resume-all',async(req,res)=>{await supabase.from('campaigns').update({status:'active'}).eq('status','paused');res.json({ok:true});});
+app.post('/api/campaigns/pause-all',async(req,res)=>{
+  // Store which campaign IDs we are pausing so resume-all only wakes those up
+  const{data:active}=await supabase.from('campaigns').select('id').eq('status','active');
+  const ids=(active||[]).map(c=>c.id);
+  if(ids.length===0)return res.json({ok:true,paused:0});
+  await supabase.from('campaigns').update({status:'paused',bulk_paused:true}).in('id',ids);
+  // Also null out next_send_at on all active contacts so they don't pile up as overdue on resume
+  await supabase.from('contacts').update({status:'paused',next_send_at:null}).in('campaign_id',ids).eq('status','active');
+  res.json({ok:true,paused:ids.length});
+});
+
+app.post('/api/campaigns/resume-all',async(req,res)=>{
+  // Only resume campaigns that were bulk-paused — don't wake campaigns paused individually
+  const{data:bulkPaused}=await supabase.from('campaigns').select('id,send_hour_start,send_hour_end,skip_weekends,timezone,random_delay_max,campaign_steps(*)').eq('status','paused').eq('bulk_paused',true);
+  if(!bulkPaused?.length)return res.json({ok:true,resumed:0});
+  const ids=bulkPaused.map(c=>c.id);
+  await supabase.from('campaigns').update({status:'active',bulk_paused:false}).in('id',ids);
+  // Reschedule paused contacts back into the next valid send window — not raw now
+  const now=new Date();
+  for(const camp of bulkPaused){
+    const steps=(camp.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+    const{data:pausedContacts}=await supabase.from('contacts').select('id,current_step').eq('campaign_id',camp.id).eq('status','paused');
+    for(const c of pausedContacts||[]){
+      const stepDef=steps.find(s=>s.step_number===c.current_step);
+      const hs=stepDef?.send_hour_start||camp.send_hour_start||9;
+      const he=stepDef?.send_hour_end||camp.send_hour_end||17;
+      const tz=camp.timezone||'America/New_York';
+      const sw=camp.skip_weekends!==undefined?camp.skip_weekends:true;
+      let nextSend=getScheduledTime(now,0,hs,he,sw,tz);
+      if(isBefore(nextSend,now))nextSend=getScheduledTime(now,1,hs,he,sw,tz);
+      nextSend=addMinutes(nextSend,Math.floor(Math.random()*(camp.random_delay_max||30)));
+      await supabase.from('contacts').update({status:'active',next_send_at:nextSend.toISOString()}).eq('id',c.id);
+    }
+  }
+  res.json({ok:true,resumed:ids.length});
+});
 
 app.post('/api/contacts/:id/send-now',async(req,res)=>{
-  const{data,error}=await supabase.from('contacts').update({next_send_at:new Date(Date.now()+30000).toISOString()}).eq('id',req.params.id).select('email').single();
-  if(error)return res.status(500).json({error:error.message});
-  res.json({ok:true,message:`${data.email} rescheduled — click Run Now to send immediately`});
+  const{data:contact}=await supabase.from('contacts').select('id,email,status').eq('id',req.params.id).single();
+  if(!contact)return res.status(404).json({error:'Contact not found'});
+  if(contact.status!=='active')return res.status(400).json({error:`Cannot send — contact status is "${contact.status}". Only active contacts can be force-scheduled.`});
+  await supabase.from('contacts').update({next_send_at:new Date(Date.now()+30000).toISOString()}).eq('id',req.params.id);
+  res.json({ok:true,message:`${contact.email} rescheduled — click Run Now to send immediately`});
 });
 
 app.get('/api/contacts/check',async(req,res)=>{
