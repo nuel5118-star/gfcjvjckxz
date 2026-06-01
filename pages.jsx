@@ -6,27 +6,26 @@ export function AnalyticsPage() {
   const [date, setDate] = useState('week');
   const [campaignId, setCampaignId] = useState('');
   const [campaigns, setCampaigns] = useState([]);
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
 
   const [events, setEvents] = useState([]);
   const [eventsTotal, setEventsTotal] = useState(0);
   const [eventsPage, setEventsPage] = useState(1);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsType, setEventsType] = useState('all');
-  const [eventsSearch, setEventsSearch] = useState('');
-  const [eventsSearchInput, setEventsSearchInput] = useState('');
-  const EVENT_PAGE_SIZE = 50;
+  const [eventsSearch, setEventsSearchInput] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const [humanOnly, setHumanOnly] = useState(false);
+  const EVENT_PAGE_SIZE = 100;
+
+  useEffect(() => { api.getCampaigns().then(c => setCampaigns(c || [])); }, []);
 
   useEffect(() => {
-    api.getCampaigns().then(c => setCampaigns(c || []));
-  }, []);
-
-  useEffect(() => {
-    setLoading(true);
+    setStatsLoading(true);
     const p = { date };
     if (campaignId) p.campaign_id = campaignId;
-    api.getAnalytics(p).then(setData).finally(() => setLoading(false));
+    api.getAnalytics(p).then(setStats).finally(() => setStatsLoading(false));
   }, [date, campaignId]);
 
   useEffect(() => {
@@ -34,80 +33,87 @@ export function AnalyticsPage() {
     const p = { date, page: eventsPage, pageSize: EVENT_PAGE_SIZE };
     if (campaignId) p.campaign_id = campaignId;
     if (eventsType !== 'all') p.type = eventsType;
-    if (eventsSearch) p.search = eventsSearch;
+    if (appliedSearch) p.search = appliedSearch;
+    if (humanOnly) p.human_only = 'true';
     api.getAnalyticsEvents(p)
       .then(d => { setEvents(d.events || []); setEventsTotal(d.total || 0); })
       .catch(() => {})
       .finally(() => setEventsLoading(false));
-  }, [date, campaignId, eventsPage, eventsType, eventsSearch]);
+  }, [date, campaignId, eventsPage, eventsType, appliedSearch, humanOnly]);
 
-  const t = data?.totals || {}, r = data?.rates || {};
-
-  // FIX: show bounces and failed in stat cards
-  const statCards = [
-    { l:'Sent',     v: t.sends   || 0, s: null },
-    { l:'Opens',    v: t.opens   || 0, s: `${r.open_rate   || 0}% rate`, accent: true },
-    { l:'Clicks',   v: t.clicks  || 0, s: `${r.click_rate  || 0}% rate`, accent: true },
-    { l:'Replies',  v: t.replies || 0, s: `${r.reply_rate  || 0}% rate`, accent: true },
-    { l:'Bounces',  v: t.bounces || 0, s: `${r.bounce_rate || 0}% rate`, danger: true },
-    { l:'Failed',   v: t.failed  || 0, s: null, warn: true },
-  ];
+  const t = stats?.totals || {};
+  const r = stats?.rates || {};
 
   const EVENT_COLORS = {
-    send:        { bg:'#e8f0fe', color:'#1a56db' },
-    open:        { bg:'#def7ec', color:'#057a55' },
-    click:       { bg:'#edebfe', color:'#7e3af2' },
-    reply:       { bg:'#fdf6b2', color:'#8e4b10' },
-    replied:     { bg:'#fdf6b2', color:'#8e4b10' },
-    bounce:      { bg:'#fde8e8', color:'#c81e1e' },
-    auto_reply:  { bg:'#feecdc', color:'#c2410c' },
-    unsubscribe: { bg:'#fde8e8', color:'#9b1c1c' },
-    delivered:   { bg:'#f0fdf4', color:'#166534' },
-    send_failed: { bg:'#fff7ed', color:'#9a3412' },
-    spam_complaint:{ bg:'#fde8e8', color:'#7f1d1d' },
-  };
-  const EVENT_LABELS = {
-    send:'Sent', open:'Opened', click:'Clicked', reply:'Replied', replied:'Replied',
-    bounce:'Bounced', auto_reply:'Auto-Reply', unsubscribe:'Unsubscribed',
-    delivered:'Delivered', send_failed:'Failed', spam_complaint:'Spam'
+    send:        { bg:'#e8f0fe', color:'#1a56db', label:'Sent' },
+    open:        { bg:'#def7ec', color:'#057a55', label:'Opened' },
+    click:       { bg:'#edebfe', color:'#7e3af2', label:'Clicked' },
+    reply:       { bg:'#fdf6b2', color:'#8e4b10', label:'Replied' },
+    replied:     { bg:'#fdf6b2', color:'#8e4b10', label:'Replied' },
+    bounce:      { bg:'#fde8e8', color:'#c81e1e', label:'Bounced' },
+    auto_reply:  { bg:'#feecdc', color:'#c2410c', label:'Auto-Reply' },
+    unsubscribe: { bg:'#fde8e8', color:'#9b1c1c', label:'Unsub' },
+    send_failed: { bg:'#fff7ed', color:'#9a3412', label:'Failed' },
+    spam_complaint: { bg:'#fde8e8', color:'#7f1d1d', label:'Spam' },
   };
 
-  const eventBadge = (type) => {
-    const s = EVENT_COLORS[type] || { bg:'var(--bg-muted)', color:'var(--text-secondary)' };
+  const badge = (type, isBot) => {
+    const s = EVENT_COLORS[type] || { bg:'var(--bg-muted)', color:'var(--text-secondary)', label:type };
     return (
-      <span style={{ fontSize:11, fontWeight:700, padding:'2px 8px', borderRadius:99,
-        background:s.bg, color:s.color, letterSpacing:'0.02em', textTransform:'uppercase', whiteSpace:'nowrap' }}>
-        {EVENT_LABELS[type] || type}
-      </span>
+      <div style={{ display:'flex', gap:4, alignItems:'center' }}>
+        <span style={{ fontSize:11, fontWeight:700, padding:'2px 8px', borderRadius:99,
+          background:s.bg, color:s.color, letterSpacing:'0.02em', textTransform:'uppercase', whiteSpace:'nowrap' }}>
+          {s.label}
+        </span>
+        {isBot && (
+          <span style={{ fontSize:10, fontWeight:600, padding:'1px 6px', borderRadius:99,
+            background:'#f3f4f6', color:'#6b7280', border:'1px solid #e5e7eb', whiteSpace:'nowrap' }}>
+            🤖 bot
+          </span>
+        )}
+      </div>
     );
   };
 
   const fmtTime = iso => {
     if (!iso) return '—';
-    return new Date(iso).toLocaleString(undefined, { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit', hour12:true });
+    return new Date(iso).toLocaleString(undefined, {
+      month:'short', day:'numeric', year:'numeric',
+      hour:'numeric', minute:'2-digit', hour12:true
+    });
   };
 
   const totalEventPages = Math.ceil(eventsTotal / EVENT_PAGE_SIZE);
+
+  const statCards = [
+    { l:'Sent',          v: t.sends    || 0, color: 'var(--text)' },
+    { l:'Opens (Human)', v: t.opens    || 0, color: '#057a55', sub: `${r.open_rate || 0}% rate` },
+    { l:'Bot Opens',     v: t.bot_opens|| 0, color: '#6b7280', sub: 'excluded from rate' },
+    { l:'Clicks',        v: t.clicks   || 0, color: '#7e3af2', sub: `${r.click_rate || 0}% rate` },
+    { l:'Replies',       v: t.replies  || 0, color: '#8e4b10', sub: `${r.reply_rate || 0}% rate` },
+    { l:'Bounces',       v: t.bounces  || 0, color: (t.bounces||0) > 0 ? '#c81e1e' : 'var(--text)', danger: (t.bounces||0) > 0 },
+    { l:'Failed',        v: t.failed   || 0, color: (t.failed||0)  > 0 ? '#c2410c' : 'var(--text)' },
+  ];
 
   return (
     <div>
       <div className="topbar">
         <div>
           <div className="topbar-title">Analytics</div>
-          <div className="topbar-sub">Email performance</div>
+          <div className="topbar-sub">Who opened, clicked, replied — every event, every contact</div>
         </div>
-        <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
           <select className="input" style={{ width:210, fontSize:13 }} value={campaignId}
             onChange={e => { setCampaignId(e.target.value); setEventsPage(1); }}>
             <option value="">All Campaigns</option>
             {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
           <div style={{ display:'flex', border:'1px solid var(--border)', borderRadius:8, overflow:'hidden' }}>
-            {[['today','Today'],['week','7 Days'],['month','30 Days'],['all','All Time']].map(([v,l]) => (
+            {[['today','Today'],['week','7d'],['month','30d'],['all','All']].map(([v,l]) => (
               <button key={v} onClick={() => { setDate(v); setEventsPage(1); }} className="btn"
                 style={{ borderRadius:0, border:'none', borderRight:'1px solid var(--border)',
                   background:date===v?'var(--accent)':'var(--bg)',
-                  color:date===v?'white':'var(--text-secondary)', padding:'6px 14px', fontSize:12 }}>
+                  color:date===v?'white':'var(--text-secondary)', padding:'6px 12px', fontSize:12 }}>
                 {l}
               </button>
             ))}
@@ -116,163 +122,128 @@ export function AnalyticsPage() {
       </div>
 
       <div className="page fade-in">
-        {/* Stat cards */}
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:12, marginBottom:24 }}>
+
+        {/* ── Stat cards ── */}
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:10, marginBottom:20 }}>
           {statCards.map(s => (
-            <div key={s.l} className="stat-card" style={{
-              borderTop: s.danger ? '3px solid var(--danger)' : s.warn ? '3px solid var(--warning)' : s.accent ? '3px solid var(--accent)' : undefined }}>
+            <div key={s.l} className="stat-card" style={{ borderTop: s.danger ? '3px solid var(--danger)' : '3px solid transparent' }}>
               <div className="stat-label">{s.l}</div>
-              <div className="stat-value" style={{
-                color: s.danger && (t.bounces||0)>0 ? 'var(--danger)'
-                     : s.warn && (t.failed||0)>0 ? 'var(--warning)' : undefined }}>{s.v}</div>
-              {s.s && <div className="stat-sub">{s.s}</div>}
+              <div className="stat-value" style={{ color: s.color, fontSize:22 }}>{statsLoading ? '…' : s.v}</div>
+              {s.sub && <div className="stat-sub">{s.sub}</div>}
             </div>
           ))}
         </div>
 
-        {/* Daily breakdown */}
-        <div className="card" style={{ marginBottom:16 }}>
-          <div style={{ fontWeight:600, fontSize:13, marginBottom:14 }}>Daily Breakdown</div>
-          {loading
-            ? <div style={{ padding:20, textAlign:'center', color:'var(--text-muted)' }}>Loading...</div>
-            : data?.daily?.length > 0
-              ? (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr><th>Date</th><th>Sent</th><th>Opens</th><th>Clicks</th><th>Replies</th><th>Bounces</th><th>Failed</th><th>Open %</th><th>Reply %</th><th>Bounce %</th></tr>
-                    </thead>
-                    <tbody>
-                      {data.daily.slice(-14).reverse().map(d => (
-                        <tr key={d.date}>
-                          <td style={{ fontWeight:500 }}>{d.date}</td>
-                          <td>{d.sends||0}</td>
-                          <td style={{ color:(d.opens||0)>0?'var(--success)':undefined }}>{d.opens||0}</td>
-                          <td>{d.clicks||0}</td>
-                          <td>{d.replies||0}</td>
-                          <td style={{ color:(d.bounces||0)>0?'var(--danger)':undefined, fontWeight:(d.bounces||0)>0?600:undefined }}>{d.bounces||0}</td>
-                          <td style={{ color:(d.failed||0)>0?'var(--warning)':undefined }}>{d.failed||0}</td>
-                          <td>{d.sends>0?((d.opens/d.sends)*100).toFixed(1)+'%':'—'}</td>
-                          <td>{d.sends>0?((d.replies/d.sends)*100).toFixed(1)+'%':'—'}</td>
-                          <td style={{ color:(d.bounces||0)>0?'var(--danger)':undefined }}>{d.sends>0?(((d.bounces||0)/d.sends)*100).toFixed(1)+'%':'—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )
-              : <div style={{ padding:20, textAlign:'center', color:'var(--text-muted)' }}>No data for this period</div>
-          }
-        </div>
-
-        {/* Inbox performance */}
-        {data?.inboxes?.length > 0 && (
-          <div className="card" style={{ marginBottom:16 }}>
-            <div style={{ fontWeight:600, fontSize:13, marginBottom:14 }}>Inbox Performance</div>
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>Inbox</th><th>Sent</th><th>Opens</th><th>Replies</th><th>Bounces</th><th>Open %</th><th>Bounce %</th></tr></thead>
-                <tbody>
-                  {data.inboxes.map(i => (
-                    <tr key={i.inbox}>
-                      <td style={{ fontFamily:'monospace', fontSize:12 }}>{i.inbox}</td>
-                      <td>{i.sends}</td>
-                      <td style={{ color:i.opens>0?'var(--success)':undefined }}>{i.opens}</td>
-                      <td>{i.replies}</td>
-                      <td style={{ color:(i.bounces||0)>0?'var(--danger)':undefined, fontWeight:(i.bounces||0)>0?600:undefined }}>{i.bounces||0}</td>
-                      <td>{i.sends>0?((i.opens/i.sends)*100).toFixed(1)+'%':'—'}</td>
-                      <td style={{ color:(i.bounces||0)>0?'var(--danger)':undefined }}>{i.sends>0?(((i.bounces||0)/i.sends)*100).toFixed(1)+'%':'—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+        {/* ── Bot warning ── */}
+        {(t.bot_opens||0) > 0 && !humanOnly && (
+          <div style={{ marginBottom:16, padding:'10px 16px', background:'#fefce8', border:'1px solid #fde047', borderRadius:8, fontSize:13, color:'#713f12', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <span>🤖 <strong>{t.bot_opens} bot opens detected</strong> — these are email security scanners (like cipher.co.site), not real people. They're labeled in the table below.</span>
+            <button className="btn btn-secondary" style={{ fontSize:12, padding:'4px 12px', marginLeft:16, whiteSpace:'nowrap' }}
+              onClick={() => setHumanOnly(true)}>Hide bots</button>
+          </div>
+        )}
+        {humanOnly && (
+          <div style={{ marginBottom:16, padding:'8px 16px', background:'#f0fdf4', border:'1px solid #86efac', borderRadius:8, fontSize:13, color:'#166534', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <span>✓ Showing human opens only — bot opens are hidden</span>
+            <button className="btn btn-secondary" style={{ fontSize:12, padding:'4px 12px', marginLeft:16 }}
+              onClick={() => setHumanOnly(false)}>Show all</button>
           </div>
         )}
 
-        {/* ── EVENT LOG ── */}
+        {/* ── Event Log — THE MAIN VIEW ── */}
         <div className="card" style={{ padding:0, overflow:'hidden' }}>
           <div style={{ padding:'14px 20px', borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:10 }}>
             <div>
-              <div style={{ fontWeight:600, fontSize:13 }}>Event Log</div>
+              <div style={{ fontWeight:600, fontSize:14 }}>Event Log</div>
               <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>
-                {eventsTotal.toLocaleString()} events — shows who opened, clicked, replied, bounced
+                {eventsTotal.toLocaleString()} events · every open, click, reply, bounce — with the contact's name and email
               </div>
             </div>
             <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
-              <select className="input" style={{ width:150, fontSize:12 }} value={eventsType}
-                onChange={e => { setEventsType(e.target.value); setEventsPage(1); }}>
-                <option value="all">All events</option>
-                <option value="open">Opens only</option>
-                <option value="click">Clicks only</option>
-                <option value="send">Sends only</option>
-                <option value="reply">Replies only</option>
-                <option value="bounce">Bounces only</option>
-                <option value="unsubscribe">Unsubscribes</option>
-                <option value="auto_reply">Auto-replies</option>
-                <option value="send_failed">Failed only</option>
-              </select>
+              {/* Type filter buttons — like the old tracker */}
+              <div style={{ display:'flex', border:'1px solid var(--border)', borderRadius:8, overflow:'hidden' }}>
+                {[['all','All'],['open','Opens'],['click','Clicks'],['reply','Replies'],['send','Sends'],['bounce','Bounces'],['send_failed','Failed']].map(([v,l]) => (
+                  <button key={v} onClick={() => { setEventsType(v); setEventsPage(1); }} className="btn"
+                    style={{ borderRadius:0, border:'none', borderRight:'1px solid var(--border)',
+                      background:eventsType===v?'var(--accent)':'var(--bg)',
+                      color:eventsType===v?'white':'var(--text-secondary)', padding:'5px 12px', fontSize:12 }}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+              {/* Search */}
               <div style={{ display:'flex', gap:4 }}>
-                <input className="input" style={{ width:190, fontSize:12 }} placeholder="Search email…"
-                  value={eventsSearchInput}
+                <input className="input" style={{ width:200, fontSize:12 }} placeholder="Search email or name…"
+                  value={eventsSearch}
                   onChange={e => setEventsSearchInput(e.target.value)}
-                  onKeyDown={e => { if(e.key==='Enter'){ setEventsSearch(eventsSearchInput); setEventsPage(1); }}}
+                  onKeyDown={e => { if(e.key==='Enter'){ setAppliedSearch(eventsSearch); setEventsPage(1); }}}
                 />
                 <button className="btn btn-secondary" style={{ fontSize:12, padding:'0 12px' }}
-                  onClick={() => { setEventsSearch(eventsSearchInput); setEventsPage(1); }}>Go</button>
-                {eventsSearch && (
+                  onClick={() => { setAppliedSearch(eventsSearch); setEventsPage(1); }}>Go</button>
+                {appliedSearch && (
                   <button className="btn btn-secondary" style={{ fontSize:12, padding:'0 10px' }}
-                    onClick={() => { setEventsSearch(''); setEventsSearchInput(''); setEventsPage(1); }}>✕</button>
+                    onClick={() => { setAppliedSearch(''); setEventsSearchInput(''); setEventsPage(1); }}>✕</button>
                 )}
               </div>
             </div>
           </div>
 
           {eventsLoading ? (
-            <div style={{ padding:30, textAlign:'center', color:'var(--text-muted)' }}>Loading events…</div>
+            <div style={{ padding:40, textAlign:'center', color:'var(--text-muted)' }}>Loading…</div>
           ) : events.length === 0 ? (
-            <div style={{ padding:30, textAlign:'center', color:'var(--text-muted)' }}>No events found for this filter</div>
+            <div style={{ padding:40, textAlign:'center', color:'var(--text-muted)' }}>
+              No events found for this filter
+              {eventsType !== 'all' && <div style={{ marginTop:8, fontSize:12 }}>Try switching to "All" to see everything</div>}
+            </div>
           ) : (
             <>
               <div className="table-wrap" style={{ borderRadius:0 }}>
                 <table>
                   <thead>
                     <tr>
+                      <th style={{ whiteSpace:'nowrap' }}>When</th>
                       <th>Event</th>
-                      <th>Contact</th>
+                      <th>Contact Name</th>
                       <th>Email Address</th>
                       <th>Subject Line</th>
-                      <th>Sent From (Inbox)</th>
+                      <th>Sent From</th>
                       <th>Campaign</th>
-                      <th>Step</th>
-                      <th>When</th>
+                      <th style={{ textAlign:'center' }}>Step</th>
                     </tr>
                   </thead>
                   <tbody>
                     {events.map((ev, idx) => (
                       <tr key={ev.id || idx} style={{
-                        background: ev.type==='open'?'rgba(5,122,85,0.03)'
-                          : ev.type==='bounce'||ev.type==='send_failed'?'rgba(220,38,38,0.03)' : undefined }}>
-                        <td style={{ whiteSpace:'nowrap' }}>{eventBadge(ev.type)}</td>
-                        <td style={{ fontSize:13, fontWeight:500, whiteSpace:'nowrap' }}>
-                          {ev.contact_name || <span style={{ color:'var(--text-muted)', fontSize:12 }}>—</span>}
+                        background:
+                          ev.type==='open' && !ev.is_bot ? 'rgba(5,122,85,0.04)' :
+                          ev.type==='reply' || ev.type==='replied' ? 'rgba(234,179,8,0.04)' :
+                          ev.type==='bounce' || ev.type==='send_failed' ? 'rgba(220,38,38,0.04)' :
+                          ev.is_bot ? 'rgba(107,114,128,0.04)' : undefined
+                      }}>
+                        <td style={{ fontSize:12, color:'var(--text-muted)', whiteSpace:'nowrap' }}>{fmtTime(ev.created_at)}</td>
+                        <td style={{ whiteSpace:'nowrap' }}>{badge(ev.type, ev.is_bot)}</td>
+                        <td style={{ fontSize:13, fontWeight:500 }}>
+                          {ev.contact_name
+                            ? <span>{ev.contact_name}</span>
+                            : <span style={{ color:'var(--text-muted)', fontSize:12 }}>—</span>}
                           {ev.contact_company && <div style={{ fontSize:11, color:'var(--text-muted)', fontWeight:400 }}>{ev.contact_company}</div>}
                         </td>
-                        <td style={{ fontFamily:'monospace', fontSize:12, maxWidth:220, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}
-                          title={ev.recipient}>{ev.recipient || '—'}</td>
-                        <td style={{ fontSize:12, maxWidth:260, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', color:'var(--text-secondary)' }}
+                        <td style={{ fontFamily:'monospace', fontSize:12 }} title={ev.recipient}>
+                          {ev.recipient || '—'}
+                        </td>
+                        <td style={{ fontSize:12, color:'var(--text-secondary)', maxWidth:260, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}
                           title={ev.subject}>{ev.subject || '—'}</td>
-                        <td style={{ fontFamily:'monospace', fontSize:11, color:'var(--text-muted)', maxWidth:190, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}
+                        <td style={{ fontFamily:'monospace', fontSize:11, color:'var(--text-muted)', maxWidth:180, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}
                           title={ev.inbox}>{ev.inbox || '—'}</td>
                         <td style={{ fontSize:12, color:'var(--text-secondary)', maxWidth:150, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}
                           title={ev.campaign}>{ev.campaign || '—'}</td>
                         <td style={{ fontSize:12, color:'var(--text-muted)', textAlign:'center' }}>{ev.step_number || '—'}</td>
-                        <td style={{ fontSize:12, color:'var(--text-muted)', whiteSpace:'nowrap' }}>{fmtTime(ev.created_at)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+
               {totalEventPages > 1 && (
                 <div className="pagination">
                   <button onClick={() => setEventsPage(p => Math.max(1,p-1))} disabled={eventsPage===1} className="btn btn-secondary btn-sm">← Prev</button>
@@ -283,6 +254,69 @@ export function AnalyticsPage() {
             </>
           )}
         </div>
+
+        {/* ── Daily breakdown — collapsed below ── */}
+        {stats?.daily?.length > 0 && (
+          <details style={{ marginTop:16 }}>
+            <summary style={{ cursor:'pointer', padding:'12px 0', fontWeight:600, fontSize:13, color:'var(--text-secondary)', userSelect:'none' }}>
+              Daily Breakdown (last 14 days)
+            </summary>
+            <div className="card" style={{ marginTop:8 }}>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Date</th><th>Sent</th><th>Opens</th><th>Bot Opens</th><th>Clicks</th><th>Replies</th><th>Bounces</th><th>Failed</th><th>Open %</th><th>Reply %</th></tr>
+                  </thead>
+                  <tbody>
+                    {stats.daily.slice(-14).reverse().map(d => (
+                      <tr key={d.date}>
+                        <td style={{ fontWeight:500 }}>{d.date}</td>
+                        <td>{d.sends||0}</td>
+                        <td style={{ color:(d.opens||0)>0?'#057a55':undefined }}>{d.opens||0}</td>
+                        <td style={{ color:'var(--text-muted)', fontSize:12 }}>{d.bot_opens||0}</td>
+                        <td>{d.clicks||0}</td>
+                        <td>{d.replies||0}</td>
+                        <td style={{ color:(d.bounces||0)>0?'var(--danger)':undefined, fontWeight:(d.bounces||0)>0?600:undefined }}>{d.bounces||0}</td>
+                        <td style={{ color:(d.failed||0)>0?'var(--warning)':undefined }}>{d.failed||0}</td>
+                        <td>{d.sends>0?((d.opens/d.sends)*100).toFixed(1)+'%':'—'}</td>
+                        <td>{d.sends>0?((d.replies/d.sends)*100).toFixed(1)+'%':'—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+        )}
+
+        {/* ── Inbox breakdown — collapsed below ── */}
+        {stats?.inboxes?.length > 0 && (
+          <details style={{ marginTop:8 }}>
+            <summary style={{ cursor:'pointer', padding:'12px 0', fontWeight:600, fontSize:13, color:'var(--text-secondary)', userSelect:'none' }}>
+              Inbox Performance
+            </summary>
+            <div className="card" style={{ marginTop:8 }}>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Inbox</th><th>Sent</th><th>Opens</th><th>Replies</th><th>Bounces</th><th>Open %</th><th>Bounce %</th></tr></thead>
+                  <tbody>
+                    {stats.inboxes.map(i => (
+                      <tr key={i.inbox}>
+                        <td style={{ fontFamily:'monospace', fontSize:12 }}>{i.inbox}</td>
+                        <td>{i.sends}</td>
+                        <td style={{ color:i.opens>0?'#057a55':undefined }}>{i.opens}</td>
+                        <td>{i.replies}</td>
+                        <td style={{ color:(i.bounces||0)>0?'var(--danger)':undefined, fontWeight:(i.bounces||0)>0?600:undefined }}>{i.bounces||0}</td>
+                        <td>{i.sends>0?((i.opens/i.sends)*100).toFixed(1)+'%':'—'}</td>
+                        <td style={{ color:(i.bounces||0)>0?'var(--danger)':undefined }}>{i.sends>0?(((i.bounces||0)/i.sends)*100).toFixed(1)+'%':'—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+        )}
       </div>
     </div>
   );
