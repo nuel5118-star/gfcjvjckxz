@@ -174,9 +174,11 @@ function injectTracking(body, params){
     const clickQ=new URLSearchParams({
       url,email,inbox,
       campaign_id:campaign_id||'',
+      campaign:campaign_name||'',
       contact_id:contact_id||'',
       step:String(step||1),
-      send_id:send_id||''
+      send_id:send_id||'',
+      subject:subject||''
     }).toString();
     return `<a${before}href="${base}/track/click?${clickQ}"${after}>`;
   });
@@ -193,11 +195,24 @@ function injectTracking(body, params){
 // TRACKING
 app.get('/track/open',async(req,res)=>{
   const{email,inbox,campaign_id,campaign,contact_id,step,send_id,subject}=req.query;
+  const ua=req.headers['user-agent']||'';
+  // Bot detection — common email security scanners and prefetch crawlers
+  const BOT_PATTERNS=/GoogleImageProxy|Googlebot|YahooMailProxy|Baiduspider|bingbot|AhrefsBot|SemrushBot|DotBot|msnbot|Outlook-iOS|Microsoft.*scanning|MailScanner|SpamAssassin|Proofpoint|Barracuda|Mimecast|Symantec|CheckPoint|FortiMail|Sophos|cipher\.co|preview|prefetch|crawler|spider|bot\b/i;
+  const is_bot=BOT_PATTERNS.test(ua);
   await supabase.from('email_events').insert({
-    type:'open',recipient:email,inbox,
-    campaign:campaign||null,campaign_id:campaign_id||null,
-    contact_id:contact_id||null,step_number:step?parseInt(step):null,
-    send_id:send_id||null,subject:subject?decodeURIComponent(subject):'',
+    type:'open',
+    recipient:email||null,
+    inbox:inbox||null,
+    // FIX: removed decodeURIComponent() — Express already decodes query params once.
+    // Double-decoding corrupts subjects containing % characters.
+    subject:subject||'',
+    campaign:campaign||null,
+    campaign_id:campaign_id||null,
+    contact_id:contact_id||null,
+    step_number:step?parseInt(step):null,
+    send_id:send_id||null,
+    is_bot:is_bot,
+    user_agent:ua.slice(0,300),
     created_at:new Date().toISOString()
   });
   res.set('Content-Type','image/gif');
@@ -207,16 +222,25 @@ app.get('/track/open',async(req,res)=>{
 });
 
 app.get('/track/click',async(req,res)=>{
-  const{url,email,inbox,campaign_id,contact_id,step,send_id}=req.query;
+  const{url,email,inbox,campaign_id,campaign,contact_id,step,send_id,subject}=req.query;
   if(!url)return res.status(400).send('Missing url');
+  const ua=req.headers['user-agent']||'';
   await supabase.from('email_events').insert({
-    type:'click',recipient:email,inbox,
-    campaign_id:campaign_id||null,contact_id:contact_id||null,
-    step_number:step?parseInt(step):null,send_id:send_id||null,
-    clicked_url:decodeURIComponent(url),
+    type:'click',
+    recipient:email||null,
+    inbox:inbox||null,
+    // FIX: subject and campaign name were missing from click events entirely
+    subject:subject||'',
+    campaign:campaign||null,
+    campaign_id:campaign_id||null,
+    contact_id:contact_id||null,
+    step_number:step?parseInt(step):null,
+    send_id:send_id||null,
+    clicked_url:url,
+    user_agent:ua.slice(0,300),
     created_at:new Date().toISOString()
   });
-  res.redirect(decodeURIComponent(url));
+  res.redirect(url);
 });
 
 // FIX: /track/reply now handles bounces + stores auto-replies as 'auto_reply' type (not 'reply')
@@ -588,22 +612,27 @@ app.get('/api/analytics',async(req,res)=>{
   // FIX: filter by campaign_id (UUID) not by campaign (name string). Previously passing campaign_id
   // as the filter value against the `campaign` (name) column always returned 0 results.
   // Also selecting campaign_id and contact_id for the event log enrichment.
-  const ev=await fetchAll(()=>{let q=supabase.from('email_events').select('type,inbox,campaign,campaign_id,contact_id,recipient,subject,created_at').gte('created_at',defaultFrom);if(campaignFilter)q=q.eq('campaign_id',campaignFilter);return q;});
+  const ev=await fetchAll(()=>{let q=supabase.from('email_events').select('type,inbox,campaign,campaign_id,contact_id,recipient,subject,is_bot,created_at').gte('created_at',defaultFrom);if(campaignFilter)q=q.eq('campaign_id',campaignFilter);return q;});
 
   const sends=ev.filter(e=>e.type==='send').length;
-  const opens=ev.filter(e=>e.type==='open').length;
+  const allOpens=ev.filter(e=>e.type==='open').length;
+  const botOpens=ev.filter(e=>e.type==='open'&&e.is_bot===true).length;
+  const opens=allOpens-botOpens; // human opens only — bot opens shown separately
   const clicks=ev.filter(e=>e.type==='click').length;
   const replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
   const bounces=ev.filter(e=>e.type==='bounce').length;
   const failed=ev.filter(e=>e.type==='send_failed').length;
 
-  // Daily breakdown — include bounces and failed
   const dailyMap={};
   ev.forEach(e=>{
     const day=e.created_at?.split('T')[0];if(!day)return;
-    if(!dailyMap[day])dailyMap[day]={date:day,sends:0,opens:0,clicks:0,replies:0,bounces:0,failed:0};
-    const typeKey={send:'sends',open:'opens',click:'clicks',reply:'replies',replied:'replies',bounce:'bounces',send_failed:'failed'}[e.type];
-    if(typeKey)dailyMap[day][typeKey]=(dailyMap[day][typeKey]||0)+1;
+    if(!dailyMap[day])dailyMap[day]={date:day,sends:0,opens:0,bot_opens:0,clicks:0,replies:0,bounces:0,failed:0};
+    if(e.type==='send')dailyMap[day].sends++;
+    else if(e.type==='open'){if(e.is_bot)dailyMap[day].bot_opens++;else dailyMap[day].opens++;}
+    else if(e.type==='click')dailyMap[day].clicks++;
+    else if(e.type==='reply'||e.type==='replied')dailyMap[day].replies++;
+    else if(e.type==='bounce')dailyMap[day].bounces++;
+    else if(e.type==='send_failed')dailyMap[day].failed++;
   });
 
   // Inbox breakdown — include bounces
@@ -627,7 +656,7 @@ app.get('/api/analytics',async(req,res)=>{
   ev.filter(e=>(e.type==='reply'||e.type==='replied')&&e.campaign_id).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].replies++;});
 
   res.json({
-    totals:{sends,opens,clicks,replies,bounces,failed,total:ev.length},
+    totals:{sends,opens,bot_opens:botOpens,all_opens:allOpens,clicks,replies,bounces,failed,total:ev.length},
     rates:{
       open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',
       click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',
@@ -642,7 +671,7 @@ app.get('/api/analytics',async(req,res)=>{
 
 // ── ANALYTICS EVENTS LOG ─────────────────────────────────────────────────────
 app.get('/api/analytics/events',async(req,res)=>{
-  const{campaign_id,date,type,search}=req.query;
+  const{campaign_id,date,type,search,human_only}=req.query;
   const page=parseInt(req.query.page||'1');
   const pageSize=parseInt(req.query.pageSize||'50');
   const offset=(page-1)*pageSize;
@@ -653,37 +682,49 @@ app.get('/api/analytics/events',async(req,res)=>{
   else if(date==='month')fromDate=new Date(now.getTime()-30*86400000).toISOString();
   else fromDate=new Date(Date.now()-90*86400000).toISOString();
 
-  // FIX: filter by campaign_id UUID, include contact_id so we can enrich with contact name
   let q=supabase.from('email_events')
-    .select('id,type,recipient,subject,inbox,campaign,campaign_id,contact_id,step_number,created_at',{count:'exact'})
+    .select('id,type,recipient,subject,inbox,campaign,campaign_id,contact_id,step_number,is_bot,user_agent,clicked_url,created_at',{count:'exact'})
     .gte('created_at',fromDate)
     .order('created_at',{ascending:false})
     .range(offset,offset+pageSize-1);
 
   if(campaign_id)q=q.eq('campaign_id',campaign_id);
   if(type&&type!=='all')q=q.eq('type',type);
+  // human_only: exclude bot opens (still shows them by default so you can see them labeled)
+  if(human_only==='true')q=q.neq('is_bot',true);
   if(search&&search.trim())q=q.ilike('recipient',`%${search.trim()}%`);
 
   const{data:events,count,error}=await q;
   if(error)return res.status(500).json({error:error.message});
 
-  // Enrich with contact names — batch fetch by contact_id
+  // Enrich with contact first_name, last_name, company
   const contactIds=[...new Set((events||[]).map(e=>e.contact_id).filter(Boolean))];
   let contactNameMap={};
   if(contactIds.length>0){
     const{data:contacts}=await supabase.from('contacts').select('id,first_name,last_name,company').in('id',contactIds);
-    (contacts||[]).forEach(c=>{contactNameMap[c.id]={first_name:c.first_name||'',last_name:c.last_name||'',company:c.company||''};});
+    (contacts||[]).forEach(c=>{
+      contactNameMap[c.id]={
+        first_name:c.first_name||'',
+        last_name:c.last_name||'',
+        company:c.company||''
+      };
+    });
   }
 
-  const enriched=(events||[]).map(e=>({
-    ...e,
-    contact_name:e.contact_id&&contactNameMap[e.contact_id]
-      ?[contactNameMap[e.contact_id].first_name,contactNameMap[e.contact_id].last_name].filter(Boolean).join(' ')||null
-      :null,
-    contact_company:e.contact_id&&contactNameMap[e.contact_id]?contactNameMap[e.contact_id].company||null:null
-  }));
+  const enriched=(events||[]).map(e=>{
+    const c=e.contact_id?contactNameMap[e.contact_id]:null;
+    return{
+      ...e,
+      contact_name:c?[c.first_name,c.last_name].filter(Boolean).join(' ')||null:null,
+      contact_company:c?c.company||null:null
+    };
+  });
 
-  res.json({events:enriched,total:count||0,page,pageSize});
+  // Summary counts for this filtered view
+  const botOpens=enriched.filter(e=>e.type==='open'&&e.is_bot).length;
+  const humanOpens=enriched.filter(e=>e.type==='open'&&!e.is_bot).length;
+
+  res.json({events:enriched,total:count||0,page,pageSize,bot_opens:botOpens,human_opens:humanOpens});
 });
 
 
