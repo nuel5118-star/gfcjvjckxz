@@ -17,7 +17,23 @@ export function AnalyticsPage() {
   const [eventsSearch, setEventsSearchInput] = useState('');
   const [appliedSearch, setAppliedSearch] = useState('');
   const [humanOnly, setHumanOnly] = useState(false);
+  const [bodyModal, setBodyModal] = useState(null); // { subject, body, recipient, inbox, sent_at, campaign_name }
+  const [bodyLoading, setBodyLoading] = useState(false);
   const EVENT_PAGE_SIZE = 100;
+
+  const openBodyModal = async (sendId, fallback) => {
+    if (!sendId) return;
+    setBodyLoading(true);
+    setBodyModal({ loading: true, ...fallback });
+    try {
+      const data = await api.getEmailBody(sendId);
+      setBodyModal(data);
+    } catch (e) {
+      setBodyModal({ ...fallback, body: 'Could not load email body.', error: true });
+    } finally {
+      setBodyLoading(false);
+    }
+  };
 
   useEffect(() => { api.getCampaigns().then(c => setCampaigns(c || [])); }, []);
 
@@ -209,10 +225,13 @@ export function AnalyticsPage() {
                       <th>Sent From</th>
                       <th>Campaign</th>
                       <th style={{ textAlign:'center' }}>Step</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {events.map((ev, idx) => (
+                    {events.map((ev, idx) => {
+                      const canPreview = ['send','open','delivered','click'].includes(ev.type) && ev.send_id;
+                      return (
                       <tr key={ev.id || idx} style={{
                         background:
                           ev.type==='open' && !ev.is_bot ? 'rgba(5,122,85,0.04)' :
@@ -238,8 +257,20 @@ export function AnalyticsPage() {
                         <td style={{ fontSize:12, color:'var(--text-secondary)', maxWidth:150, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}
                           title={ev.campaign}>{ev.campaign || '—'}</td>
                         <td style={{ fontSize:12, color:'var(--text-muted)', textAlign:'center' }}>{ev.step_number || '—'}</td>
+                        <td>
+                          {canPreview && (
+                            <button
+                              className="btn btn-secondary"
+                              style={{ fontSize:11, padding:'2px 10px', whiteSpace:'nowrap' }}
+                              onClick={() => openBodyModal(ev.send_id, { subject: ev.subject, recipient: ev.recipient, inbox: ev.inbox, campaign_name: ev.campaign })}
+                            >
+                              View Email
+                            </button>
+                          )}
+                        </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -318,13 +349,63 @@ export function AnalyticsPage() {
           </details>
         )}
       </div>
+
+      {/* ── EMAIL BODY PREVIEW MODAL ── */}
+      {bodyModal && (
+        <div style={{
+          position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', zIndex:1000,
+          display:'flex', alignItems:'center', justifyContent:'center', padding:20
+        }} onClick={() => setBodyModal(null)}>
+          <div style={{
+            background:'var(--bg)', borderRadius:12, width:'100%', maxWidth:720,
+            maxHeight:'90vh', display:'flex', flexDirection:'column',
+            boxShadow:'0 20px 60px rgba(0,0,0,0.4)', overflow:'hidden'
+          }} onClick={e => e.stopPropagation()}>
+
+            <div style={{ padding:'16px 20px', borderBottom:'1px solid var(--border)', display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+              <div>
+                <div style={{ fontWeight:700, fontSize:14, marginBottom:4 }}>
+                  {bodyModal.loading ? 'Loading…' : bodyModal.subject || '(no subject)'}
+                </div>
+                <div style={{ fontSize:12, color:'var(--text-muted)', display:'flex', gap:16, flexWrap:'wrap' }}>
+                  {bodyModal.recipient && <span>To: <span style={{ fontFamily:'monospace' }}>{bodyModal.recipient}</span></span>}
+                  {bodyModal.inbox && <span>From: <span style={{ fontFamily:'monospace' }}>{bodyModal.inbox}</span></span>}
+                  {bodyModal.campaign_name && <span>Campaign: {bodyModal.campaign_name}</span>}
+                  {bodyModal.sent_at && <span>Sent: {fmtTime(bodyModal.sent_at)}</span>}
+                </div>
+              </div>
+              <button onClick={() => setBodyModal(null)} style={{
+                background:'none', border:'none', fontSize:20, cursor:'pointer',
+                color:'var(--text-muted)', lineHeight:1, padding:'0 4px', marginLeft:16
+              }}>✕</button>
+            </div>
+
+            <div style={{ flex:1, overflow:'auto' }}>
+              {bodyModal.loading ? (
+                <div style={{ padding:40, textAlign:'center', color:'var(--text-muted)' }}>Loading email body…</div>
+              ) : bodyModal.error ? (
+                <div style={{ padding:40, textAlign:'center', color:'var(--danger)' }}>{bodyModal.body}</div>
+              ) : bodyModal.body ? (
+                <iframe
+                  srcDoc={bodyModal.body}
+                  style={{ width:'100%', height:'500px', border:'none', display:'block' }}
+                  sandbox="allow-same-origin"
+                  title="Email preview"
+                />
+              ) : (
+                <div style={{ padding:40, textAlign:'center', color:'var(--text-muted)' }}>No body stored for this send.</div>
+              )}
+            </div>
+
+            <div style={{ padding:'12px 20px', borderTop:'1px solid var(--border)', display:'flex', justifyContent:'flex-end' }}>
+              <button className="btn btn-secondary" onClick={() => setBodyModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
-
-
-// ── INBOXES ───────────────────────────────────────────────────────────────────
 export function InboxesPage() {
   const [inboxes, setInboxes] = useState([]);
   const [adding, setAdding] = useState(false);
