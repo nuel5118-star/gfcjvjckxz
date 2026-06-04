@@ -44,6 +44,7 @@ export const api = {
   updateSettings: (data) => req('PUT', '/settings', data),
   getAnalytics: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/analytics?${qs}`); },
   getAnalyticsEvents: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/analytics/events?${qs}`); },
+  getEmailBody: (sendId) => req('GET', `/email/body/${sendId}`),
   getCalculatorLeads: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/calculator-leads?${qs}`); },
   getReplies: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/replies?${qs}`); }
 };
