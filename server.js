@@ -255,14 +255,33 @@ app.post('/track/reply',async(req,res)=>{
   const bounce=detectBounce(subject,latest_reply);
   const{data:contactRow}=await supabase.from('contacts').select('id,campaign_id,campaigns!inner(name,stop_on_auto_reply)').eq('email',email).limit(1).single();
   const campaignName=contactRow?.campaigns?.name||null;
+  const campaignId=contactRow?.campaign_id||null;
+  const contactId=contactRow?.id||null;
   const eventType=bounce?'bounce':unsub?'unsubscribe':autoReply?'auto_reply':'reply';
-  await supabase.from('email_events').insert({type:eventType,recipient:sender_email,sender_name,inbox:recipient_inbox,subject,reply_body:latest_reply,campaign:campaignName,created_at:date||new Date().toISOString()});
+
+  // FIX: include campaign_id and contact_id so analytics can filter correctly
+  await supabase.from('email_events').insert({
+    type:eventType,
+    recipient:sender_email,
+    sender_name,
+    inbox:recipient_inbox,
+    subject,
+    reply_body:latest_reply,
+    campaign:campaignName,
+    campaign_id:campaignId,
+    contact_id:contactId,
+    created_at:date||new Date().toISOString()
+  });
+
   if(bounce){
     await addToBlacklist(email,'bounce');
-    await logSchedulerActivity('warn',`Bounce detected for ${email}`,{email,subject});
+    // FIX: was missing contact status update — bounced contacts stayed active and kept getting scheduled
+    await supabase.from('contacts').update({status:'bounced',next_send_at:null,finished_at:new Date().toISOString()}).eq('email',email);
+    await logSchedulerActivity('warn',`Bounce detected for ${email} — blacklisted and stopped`,{email,subject});
   }else if(unsub){
     await addToBlacklist(email,'unsubscribed');
-    await logSchedulerActivity('info',`Unsubscribe from ${email}`,{email});
+    await supabase.from('contacts').update({status:'removed',next_send_at:null,finished_at:new Date().toISOString()}).eq('email',email);
+    await logSchedulerActivity('info',`Unsubscribe from ${email} — blacklisted and stopped`,{email});
   }else if(autoReply){
     if(contactRow?.campaigns?.stop_on_auto_reply){
       await supabase.from('contacts').update({status:'auto_replied',next_send_at:null}).eq('email',email);
@@ -669,7 +688,25 @@ app.get('/api/analytics',async(req,res)=>{
   });
 });
 
-// ── ANALYTICS EVENTS LOG ─────────────────────────────────────────────────────
+// ── EMAIL BODY PREVIEW ───────────────────────────────────────────────────────
+// Returns the clean email body (no tracking pixels) for a given send_id.
+// Used by the Analytics Event Log "View Email" button.
+app.get('/api/email/body/:sendId',async(req,res)=>{
+  const{data,error}=await supabase.from('sequence_sends')
+    .select('body,subject,email,inbox,sent_at,step_number,campaign_id,campaigns(name)')
+    .eq('id',req.params.sendId)
+    .single();
+  if(error||!data)return res.status(404).json({error:'Send record not found'});
+  res.json({
+    body:data.body||'',
+    subject:data.subject||'',
+    recipient:data.email||'',
+    inbox:data.inbox||'',
+    sent_at:data.sent_at||'',
+    step_number:data.step_number||null,
+    campaign_name:data.campaigns?.name||''
+  });
+});
 app.get('/api/analytics/events',async(req,res)=>{
   const{campaign_id,date,type,search,human_only}=req.query;
   const page=parseInt(req.query.page||'1');
@@ -852,29 +889,96 @@ app.post('/api/email/delivery-report',async(req,res)=>{
   }
 
   if(status==='failed'){
-    // FIX: failed emails should re-queue the contact (reset next_send_at to tomorrow's window)
-    // so the scheduler retries them — not just log and forget
-    if(resolvedContactId){
-      const{data:camp}=await supabase.from('campaigns').select('send_hour_start,send_hour_end,skip_weekends,timezone,random_delay_max').eq('id',resolvedCampaignId).single();
-      if(camp){
-        const now=new Date();
-        let nextSend=getScheduledTime(now,1,camp.send_hour_start||9,camp.send_hour_end||17,camp.skip_weekends,camp.timezone||'America/New_York');
-        nextSend=addMinutes(nextSend,Math.floor(Math.random()*(camp.random_delay_max||30)));
-        await supabase.from('contacts').update({next_send_at:nextSend.toISOString()}).eq('id',resolvedContactId).eq('status','active');
+    // Classify the failure type from the reason/error message n8n sends back.
+    // PERMANENT failures = address does not exist, was rejected, blacklisted by receiving server.
+    //   → Blacklist immediately. Do NOT reschedule. Sending again hurts deliverability.
+    // TEMPORARY failures = connection timeout, rate limit, server busy.
+    //   → Reschedule to tomorrow. Try again.
+    const reason_lower=(reason||'').toLowerCase();
+    const isPermanent=(
+      // n8n "all recipients" / "no recipients accepted" errors
+      reason_lower.includes('no recipients')||
+      reason_lower.includes('all recipients')||
+      reason_lower.includes('recipient rejected')||
+      reason_lower.includes('none were accepted')||
+      // SMTP 5xx permanent errors
+      reason_lower.includes('550')||// mailbox not found / rejected
+      reason_lower.includes('551')||// user not local
+      reason_lower.includes('552')||// mailbox full (treat as permanent)
+      reason_lower.includes('553')||// mailbox name invalid
+      reason_lower.includes('554')||// transaction failed / spam reject
+      reason_lower.includes('user unknown')||
+      reason_lower.includes('does not exist')||
+      reason_lower.includes('invalid address')||
+      reason_lower.includes('invalid recipient')||
+      reason_lower.includes('no such user')||
+      reason_lower.includes('address rejected')||
+      reason_lower.includes('domain not found')||
+      reason_lower.includes('undeliverable')||
+      reason_lower.includes('blacklisted')||
+      reason_lower.includes('blocked')||
+      reason_lower.includes('spam')||
+      reason_lower.includes('undefined')// n8n returns "undefined" when recipient simply didn't exist
+    );
+
+    if(isPermanent){
+      // Permanent — blacklist and stop. This address is dead or rejecting us.
+      await addToBlacklist(cleanEmail,'permanent_failure');
+      await supabase.from('contacts').update({
+        status:'bounced',
+        next_send_at:null,
+        finished_at:new Date().toISOString()
+      }).eq('email',cleanEmail);
+      await supabase.from('email_events').insert({
+        type:'bounce',
+        recipient:cleanEmail,
+        inbox:resolvedInbox,
+        subject:resolvedSubject,
+        campaign_id:resolvedCampaignId,
+        contact_id:resolvedContactId,
+        step_number:resolvedStep,
+        send_id:send_id||null,
+        created_at:new Date().toISOString()
+      });
+      await logSchedulerActivity('warn',
+        `Permanent failure for ${cleanEmail} — blacklisted (reason: ${reason||'none'})`,
+        {email:cleanEmail,reason,isPermanent:true}
+      );
+      return res.json({ok:true,action:'blacklisted_permanent',email:cleanEmail,reason});
+    }else{
+      // Temporary — reschedule to tomorrow's window and try again
+      if(resolvedContactId){
+        const{data:camp}=await supabase.from('campaigns')
+          .select('send_hour_start,send_hour_end,skip_weekends,timezone,random_delay_max,campaign_steps(*)')
+          .eq('id',resolvedCampaignId).single();
+        if(camp){
+          const steps=(camp.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+          const stepDef=steps.find(s=>s.step_number===resolvedStep);
+          const hs=stepDef?.send_hour_start?parseInt(stepDef.send_hour_start):(camp.send_hour_start||9);
+          const he=stepDef?.send_hour_end?parseInt(stepDef.send_hour_end):(camp.send_hour_end||17);
+          const now=new Date();
+          let nextSend=getScheduledTime(now,1,hs,he,camp.skip_weekends,camp.timezone||'America/New_York');
+          nextSend=addMinutes(nextSend,Math.floor(Math.random()*(camp.random_delay_max||30)));
+          await supabase.from('contacts').update({next_send_at:nextSend.toISOString()}).eq('id',resolvedContactId).eq('status','active');
+        }
       }
+      await supabase.from('email_events').insert({
+        type:'send_failed',
+        recipient:cleanEmail,
+        inbox:resolvedInbox,
+        subject:resolvedSubject,
+        campaign_id:resolvedCampaignId,
+        contact_id:resolvedContactId,
+        step_number:resolvedStep,
+        send_id:send_id||null,
+        created_at:new Date().toISOString()
+      });
+      await logSchedulerActivity('warn',
+        `Temporary failure for ${cleanEmail} — rescheduled to tomorrow (reason: ${reason||'none'})`,
+        {email:cleanEmail,reason,isPermanent:false}
+      );
+      return res.json({ok:true,action:'rescheduled_temporary',email:cleanEmail,reason});
     }
-    await supabase.from('email_events').insert({
-      type:'send_failed',
-      recipient:cleanEmail,
-      inbox:resolvedInbox,
-      subject:resolvedSubject,
-      campaign_id:resolvedCampaignId,
-      contact_id:resolvedContactId,
-      step_number:resolvedStep,
-      send_id:send_id||null,
-      created_at:new Date().toISOString()
-    });
-    return res.json({ok:true,action:'logged_failure_rescheduled',email:cleanEmail,reason});
   }
 });
 
