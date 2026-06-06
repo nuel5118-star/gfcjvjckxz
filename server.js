@@ -689,14 +689,21 @@ app.get('/api/analytics',async(req,res)=>{
 });
 
 // ── EMAIL BODY PREVIEW ───────────────────────────────────────────────────────
-// Returns the clean email body (no tracking pixels) for a given send_id.
-// Used by the Analytics Event Log "View Email" button.
 app.get('/api/email/body/:sendId',async(req,res)=>{
   const{data,error}=await supabase.from('sequence_sends')
-    .select('body,subject,email,inbox,sent_at,step_number,campaign_id,campaigns(name)')
+    .select('body,subject,email,inbox,sent_at,step_number,campaign_id')
     .eq('id',req.params.sendId)
     .single();
-  if(error||!data)return res.status(404).json({error:'Send record not found'});
+  if(error||!data){
+    console.error('[EmailBody] Not found:',req.params.sendId,error?.message);
+    return res.status(404).json({error:'Email body not found. This send may have been recorded before body storage was enabled.'});
+  }
+  // Fetch campaign name separately — avoids FK join issues
+  let campaignName='';
+  if(data.campaign_id){
+    const{data:camp}=await supabase.from('campaigns').select('name').eq('id',data.campaign_id).single();
+    campaignName=camp?.name||'';
+  }
   res.json({
     body:data.body||'',
     subject:data.subject||'',
@@ -704,7 +711,7 @@ app.get('/api/email/body/:sendId',async(req,res)=>{
     inbox:data.inbox||'',
     sent_at:data.sent_at||'',
     step_number:data.step_number||null,
-    campaign_name:data.campaigns?.name||''
+    campaign_name:campaignName
   });
 });
 app.get('/api/analytics/events',async(req,res)=>{
@@ -1066,8 +1073,14 @@ async function runScheduler(manual=false){
       // Each campaign only fires when ITS window is open, using ITS allocation.
       let anyBatchSent=false;
 
+      // Re-fetch total sent today from DB on every iteration — not just at start.
+      // This ensures if the cron ran multiple times or another process sent emails,
+      // we always have the accurate count before deciding how many more to send.
+      const totalTodayNow=await getTotalDailyCount(settingsTz)+totalSentThisRun;
+      if(totalTodayNow>=dailyCap){await logSchedulerActivity('info',`Daily cap reached mid-run (${totalTodayNow}/${dailyCap})`,{},runId);break;}
+
       for(const campaign of activeCampaigns){
-        if(totalSentThisRun>=(dailyCap-totalToday))break;
+        if((await getTotalDailyCount(settingsTz)+totalSentThisRun)>=dailyCap)break;
         if(!activeCampaignIds.includes(campaign.id))continue;// campaign may have ended
 
         const tz=campaign.timezone||'America/New_York';
@@ -1126,7 +1139,7 @@ async function runScheduler(manual=false){
         const batchMeta=[];
 
         for(const contact of batch){
-          if(totalSentThisRun>=(dailyCap-totalToday))break;
+          if((totalToday+totalSentThisRun)>=dailyCap)break;
 
           const inbox=contact.assigned_inbox;
           if(!inbox){result.skipped++;result.skip_reasons.no_inbox_assigned=(result.skip_reasons.no_inbox_assigned||0)+1;continue;}
