@@ -1,5 +1,38 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from './api.js';
+
+// ── SCROLL TABLE — shows horizontal scrollbar on top AND bottom ───────────────
+function ScrollTable({ children, style }) {
+  const topRef = useRef(null);
+  const botRef = useRef(null);
+  const innerRef = useRef(null);
+  useEffect(() => {
+    const top = topRef.current;
+    const bot = botRef.current;
+    const inner = innerRef.current;
+    if (!top || !bot || !inner) return;
+    // Set the top dummy div width to match the table's actual scroll width
+    const syncWidth = () => { top.firstChild.style.width = inner.scrollWidth + 'px'; };
+    syncWidth();
+    const ro = new ResizeObserver(syncWidth);
+    ro.observe(inner);
+    const onTopScroll = () => { bot.scrollLeft = top.scrollLeft; };
+    const onBotScroll = () => { top.scrollLeft = bot.scrollLeft; };
+    top.addEventListener('scroll', onTopScroll);
+    bot.addEventListener('scroll', onBotScroll);
+    return () => { top.removeEventListener('scroll', onTopScroll); bot.removeEventListener('scroll', onBotScroll); ro.disconnect(); };
+  }, []);
+  return (
+    <div style={style}>
+      <div ref={topRef} style={{ overflowX:'auto', overflowY:'hidden', height:10, marginBottom:2 }}>
+        <div style={{ height:1 }} />
+      </div>
+      <div ref={botRef} style={{ overflowX:'auto' }}>
+        <div ref={innerRef}>{children}</div>
+      </div>
+    </div>
+  );
+}
 
 // ── ANALYTICS ─────────────────────────────────────────────────────────────────
 export function AnalyticsPage() {
@@ -213,7 +246,7 @@ export function AnalyticsPage() {
             </div>
           ) : (
             <>
-              <div className="table-wrap" style={{ borderRadius:0 }}>
+              <ScrollTable style={{ borderRadius:0 }}>
                 <table>
                   <thead>
                     <tr>
@@ -273,7 +306,7 @@ export function AnalyticsPage() {
                     })}
                   </tbody>
                 </table>
-              </div>
+              </ScrollTable>
 
               {totalEventPages > 1 && (
                 <div className="pagination">
