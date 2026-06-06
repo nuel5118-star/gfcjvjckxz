@@ -153,6 +153,19 @@ function injectTracking(body, params){
   const{email,inbox,campaign_id,campaign_name,contact_id,step,send_id,subject}=params;
   const base=APP_URL;
 
+  // If body is plain text (no HTML tags), convert newlines to <br> so
+  // email clients respect the line breaks the user typed in the campaign builder.
+  // Double newlines (blank lines / paragraph breaks) become a visible gap.
+  const isPlainText=!/<[a-z][\s\S]*>/i.test(body);
+  if(isPlainText){
+    body=body
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/\n\n+/g,'<br><br>')// blank line = visible paragraph gap
+      .replace(/\n/g,'<br>');// single enter = line break
+  }
+
   // Build pixel URL with all enriched params
   const pixelQ=new URLSearchParams({
     email,inbox,
@@ -221,7 +234,29 @@ app.get('/track/open',async(req,res)=>{
   res.send(PIXEL);
 });
 
-app.get('/track/click',async(req,res)=>{
+// ── CALCULATOR TRACKING ───────────────────────────────────────────────────────
+// When a contact clicks the calculator link in an email, this logs the click
+// and redirects them to the actual calculator page.
+app.get('/track/calculator',async(req,res)=>{
+  const{email,contact_id,campaign_id,inbox,step,send_id}=req.query;
+  const CALCULATOR_URL='https://botcipher.github.io/Revenue-calculator/';
+  try{
+    await supabase.from('email_events').insert({
+      type:'click',
+      recipient:email||null,
+      contact_id:contact_id||null,
+      campaign_id:campaign_id||null,
+      inbox:inbox||null,
+      step_number:step?parseInt(step):null,
+      send_id:send_id||null,
+      clicked_url:CALCULATOR_URL,
+      subject:'Calculator Link',
+      created_at:new Date().toISOString()
+    });
+  }catch(e){console.error('[track/calculator]',e.message);}
+  // Always redirect regardless of whether logging succeeded
+  res.redirect(CALCULATOR_URL);
+});
   const{url,email,inbox,campaign_id,campaign,contact_id,step,send_id,subject}=req.query;
   if(!url)return res.status(400).send('Missing url');
   const ua=req.headers['user-agent']||'';
