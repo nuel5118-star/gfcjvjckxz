@@ -257,6 +257,8 @@ app.get('/track/calculator',async(req,res)=>{
   // Always redirect regardless of whether logging succeeded
   res.redirect(CALCULATOR_URL);
 });
+
+app.get('/track/click',async(req,res)=>{
   const{url,email,inbox,campaign_id,campaign,contact_id,step,send_id,subject}=req.query;
   if(!url)return res.status(400).send('Missing url');
   const ua=req.headers['user-agent']||'';
