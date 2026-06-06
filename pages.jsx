@@ -60,7 +60,30 @@ export function AnalyticsPage() {
     setBodyModal({ loading: true, ...fallback });
     try {
       const data = await api.getEmailBody(sendId);
-      setBodyModal(data);
+      // Detect if body is plain text (no HTML tags) and convert to proper HTML
+      // so line breaks and spacing render correctly in the iframe
+      let body = data.body || '';
+      const isPlainText = !/<[a-z][\s\S]*>/i.test(body);
+      if (isPlainText && body) {
+        // Convert plain text to HTML: preserve line breaks and spacing
+        body = `<!DOCTYPE html><html><head><style>
+          body { font-family: Arial, sans-serif; font-size: 14px; line-height: 1.8;
+                 color: #222; padding: 24px; max-width: 600px; margin: 0 auto; }
+          p { margin: 0 0 12px 0; }
+        </style></head><body>${
+          body
+            .split(/\n\n+/)
+            .map(para => `<p>${para.replace(/\n/g, '<br>')}</p>`)
+            .join('')
+        }</body></html>`;
+      } else if (body && !body.toLowerCase().includes('<html')) {
+        // Has HTML tags but no full document wrapper — wrap it with proper styles
+        body = `<!DOCTYPE html><html><head><style>
+          body { font-family: Arial, sans-serif; font-size: 14px; line-height: 1.8;
+                 color: #222; padding: 24px; max-width: 600px; margin: 0 auto; }
+        </style></head><body>${body}</body></html>`;
+      }
+      setBodyModal({ ...data, body });
     } catch (e) {
       setBodyModal({ ...fallback, body: 'Could not load email body.', error: true });
     } finally {
