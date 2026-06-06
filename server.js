@@ -720,7 +720,7 @@ app.get('/api/analytics/events',async(req,res)=>{
   else fromDate=new Date(Date.now()-90*86400000).toISOString();
 
   let q=supabase.from('email_events')
-    .select('id,type,recipient,subject,inbox,campaign,campaign_id,contact_id,step_number,is_bot,user_agent,clicked_url,created_at',{count:'exact'})
+    .select('id,type,recipient,subject,inbox,campaign,campaign_id,contact_id,step_number,send_id,is_bot,user_agent,clicked_url,created_at',{count:'exact'})
     .gte('created_at',fromDate)
     .order('created_at',{ascending:false})
     .range(offset,offset+pageSize-1);
