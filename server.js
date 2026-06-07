@@ -671,6 +671,7 @@ app.get('/api/analytics',async(req,res)=>{
   const ev=await fetchAll(()=>{let q=supabase.from('email_events').select('type,inbox,campaign,campaign_id,contact_id,recipient,subject,is_bot,created_at').gte('created_at',defaultFrom);if(campaignFilter)q=q.eq('campaign_id',campaignFilter);return q;});
 
   const sends=ev.filter(e=>e.type==='send').length;
+  const delivered=ev.filter(e=>e.type==='delivered').length;
   const allOpens=ev.filter(e=>e.type==='open').length;
   const botOpens=ev.filter(e=>e.type==='open'&&e.is_bot===true).length;
   const opens=allOpens-botOpens; // human opens only — bot opens shown separately
@@ -678,6 +679,8 @@ app.get('/api/analytics',async(req,res)=>{
   const replies=ev.filter(e=>e.type==='reply'||e.type==='replied').length;
   const bounces=ev.filter(e=>e.type==='bounce').length;
   const failed=ev.filter(e=>e.type==='send_failed').length;
+  // Real delivered = confirmed delivered if available, otherwise sent minus known failures
+  const realDelivered=delivered>0?delivered:Math.max(0,sends-failed);
 
   const dailyMap={};
   ev.forEach(e=>{
@@ -712,7 +715,7 @@ app.get('/api/analytics',async(req,res)=>{
   ev.filter(e=>(e.type==='reply'||e.type==='replied')&&e.campaign_id).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].replies++;});
 
   res.json({
-    totals:{sends,opens,bot_opens:botOpens,all_opens:allOpens,clicks,replies,bounces,failed,total:ev.length},
+    totals:{sends,opens,bot_opens:botOpens,all_opens:allOpens,clicks,replies,bounces,failed,delivered:realDelivered,total:ev.length},
     rates:{
       open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',
       click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',
@@ -933,24 +936,17 @@ app.post('/api/email/delivery-report',async(req,res)=>{
   }
 
   if(status==='failed'){
-    // Classify the failure type from the reason/error message n8n sends back.
-    // PERMANENT failures = address does not exist, was rejected, blacklisted by receiving server.
-    //   → Blacklist immediately. Do NOT reschedule. Sending again hurts deliverability.
-    // TEMPORARY failures = connection timeout, rate limit, server busy.
-    //   → Reschedule to tomorrow. Try again.
     const reason_lower=(reason||'').toLowerCase();
     const isPermanent=(
-      // n8n "all recipients" / "no recipients accepted" errors
       reason_lower.includes('no recipients')||
       reason_lower.includes('all recipients')||
       reason_lower.includes('recipient rejected')||
       reason_lower.includes('none were accepted')||
-      // SMTP 5xx permanent errors
-      reason_lower.includes('550')||// mailbox not found / rejected
-      reason_lower.includes('551')||// user not local
-      reason_lower.includes('552')||// mailbox full (treat as permanent)
-      reason_lower.includes('553')||// mailbox name invalid
-      reason_lower.includes('554')||// transaction failed / spam reject
+      reason_lower.includes('550')||
+      reason_lower.includes('551')||
+      reason_lower.includes('552')||
+      reason_lower.includes('553')||
+      reason_lower.includes('554')||
       reason_lower.includes('user unknown')||
       reason_lower.includes('does not exist')||
       reason_lower.includes('invalid address')||
@@ -962,35 +958,52 @@ app.post('/api/email/delivery-report',async(req,res)=>{
       reason_lower.includes('blacklisted')||
       reason_lower.includes('blocked')||
       reason_lower.includes('spam')||
-      reason_lower.includes('undefined')// n8n returns "undefined" when recipient simply didn't exist
+      reason_lower.includes('undefined')
     );
 
     if(isPermanent){
-      // Permanent — blacklist and stop. This address is dead or rejecting us.
+      // Permanent failure — blacklist immediately, no second chance
       await addToBlacklist(cleanEmail,'permanent_failure');
       await supabase.from('contacts').update({
-        status:'bounced',
-        next_send_at:null,
-        finished_at:new Date().toISOString()
+        status:'bounced',next_send_at:null,
+        finished_at:new Date().toISOString(),fail_count:2
       }).eq('email',cleanEmail);
       await supabase.from('email_events').insert({
-        type:'bounce',
-        recipient:cleanEmail,
-        inbox:resolvedInbox,
-        subject:resolvedSubject,
-        campaign_id:resolvedCampaignId,
-        contact_id:resolvedContactId,
-        step_number:resolvedStep,
-        send_id:send_id||null,
-        created_at:new Date().toISOString()
+        type:'bounce',recipient:cleanEmail,inbox:resolvedInbox,
+        subject:resolvedSubject,campaign_id:resolvedCampaignId,
+        contact_id:resolvedContactId,step_number:resolvedStep,
+        send_id:send_id||null,created_at:new Date().toISOString()
       });
-      await logSchedulerActivity('warn',
-        `Permanent failure for ${cleanEmail} — blacklisted (reason: ${reason||'none'})`,
-        {email:cleanEmail,reason,isPermanent:true}
-      );
+      await logSchedulerActivity('warn',`Permanent failure for ${cleanEmail} — blacklisted`,{email:cleanEmail,reason});
       return res.json({ok:true,action:'blacklisted_permanent',email:cleanEmail,reason});
+    }
+
+    // Temporary failure — check fail_count
+    // 1st failure → warning, reschedule tomorrow
+    // 2nd failure → blacklist, stop permanently
+    const{data:contactData}=await supabase.from('contacts')
+      .select('id,fail_count,status')
+      .eq('email',cleanEmail).single();
+
+    const currentFailCount=(contactData?.fail_count||0)+1;
+
+    if(currentFailCount>=2){
+      // Second failure — blacklist now
+      await addToBlacklist(cleanEmail,'two_failures');
+      await supabase.from('contacts').update({
+        status:'bounced',next_send_at:null,
+        finished_at:new Date().toISOString(),fail_count:currentFailCount
+      }).eq('email',cleanEmail);
+      await supabase.from('email_events').insert({
+        type:'bounce',recipient:cleanEmail,inbox:resolvedInbox,
+        subject:resolvedSubject,campaign_id:resolvedCampaignId,
+        contact_id:resolvedContactId,step_number:resolvedStep,
+        send_id:send_id||null,created_at:new Date().toISOString()
+      });
+      await logSchedulerActivity('warn',`2nd failure for ${cleanEmail} — blacklisted`,{email:cleanEmail,reason});
+      return res.json({ok:true,action:'blacklisted_second_failure',email:cleanEmail});
     }else{
-      // Temporary — reschedule to tomorrow's window and try again
+      // First failure — reschedule to tomorrow, mark as warning
       if(resolvedContactId){
         const{data:camp}=await supabase.from('campaigns')
           .select('send_hour_start,send_hour_end,skip_weekends,timezone,random_delay_max,campaign_steps(*)')
@@ -1003,25 +1016,20 @@ app.post('/api/email/delivery-report',async(req,res)=>{
           const now=new Date();
           let nextSend=getScheduledTime(now,1,hs,he,camp.skip_weekends,camp.timezone||'America/New_York');
           nextSend=addMinutes(nextSend,Math.floor(Math.random()*(camp.random_delay_max||30)));
-          await supabase.from('contacts').update({next_send_at:nextSend.toISOString()}).eq('id',resolvedContactId).eq('status','active');
+          await supabase.from('contacts').update({
+            next_send_at:nextSend.toISOString(),
+            fail_count:currentFailCount
+          }).eq('id',resolvedContactId).eq('status','active');
         }
       }
       await supabase.from('email_events').insert({
-        type:'send_failed',
-        recipient:cleanEmail,
-        inbox:resolvedInbox,
-        subject:resolvedSubject,
-        campaign_id:resolvedCampaignId,
-        contact_id:resolvedContactId,
-        step_number:resolvedStep,
-        send_id:send_id||null,
-        created_at:new Date().toISOString()
+        type:'send_failed',recipient:cleanEmail,inbox:resolvedInbox,
+        subject:resolvedSubject,campaign_id:resolvedCampaignId,
+        contact_id:resolvedContactId,step_number:resolvedStep,
+        send_id:send_id||null,created_at:new Date().toISOString()
       });
-      await logSchedulerActivity('warn',
-        `Temporary failure for ${cleanEmail} — rescheduled to tomorrow (reason: ${reason||'none'})`,
-        {email:cleanEmail,reason,isPermanent:false}
-      );
-      return res.json({ok:true,action:'rescheduled_temporary',email:cleanEmail,reason});
+      await logSchedulerActivity('warn',`1st failure for ${cleanEmail} — rescheduled to tomorrow (1/2 strikes)`,{email:cleanEmail,reason});
+      return res.json({ok:true,action:'rescheduled_first_failure',email:cleanEmail,strikes:`${currentFailCount}/2`});
     }
   }
 });
