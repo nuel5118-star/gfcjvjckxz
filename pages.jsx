@@ -158,13 +158,13 @@ export function AnalyticsPage() {
   const totalEventPages = Math.ceil(eventsTotal / EVENT_PAGE_SIZE);
 
   const statCards = [
-    { l:'Sent',          v: t.sends    || 0, color: 'var(--text)' },
-    { l:'Opens (Human)', v: t.opens    || 0, color: '#057a55', sub: `${r.open_rate || 0}% rate` },
-    { l:'Bot Opens',     v: t.bot_opens|| 0, color: '#6b7280', sub: 'excluded from rate' },
-    { l:'Clicks',        v: t.clicks   || 0, color: '#7e3af2', sub: `${r.click_rate || 0}% rate` },
-    { l:'Replies',       v: t.replies  || 0, color: '#8e4b10', sub: `${r.reply_rate || 0}% rate` },
-    { l:'Bounces',       v: t.bounces  || 0, color: (t.bounces||0) > 0 ? '#c81e1e' : 'var(--text)', danger: (t.bounces||0) > 0 },
-    { l:'Failed',        v: t.failed   || 0, color: (t.failed||0)  > 0 ? '#c2410c' : 'var(--text)' },
+    { l:'Attempted',    v: t.sends      || 0, color:'var(--text)',  sub:'webhook fired' },
+    { l:'Delivered',    v: t.delivered  || 0, color:'#057a55',      sub:'actually reached inbox' },
+    { l:'Opens (Human)',v: t.opens      || 0, color:'#1a56db',      sub:`${r.open_rate||0}% rate` },
+    { l:'Bot Opens',    v: t.bot_opens  || 0, color:'#6b7280',      sub:'excluded from rate' },
+    { l:'Clicks',       v: t.clicks     || 0, color:'#7e3af2',      sub:`${r.click_rate||0}% rate` },
+    { l:'Replies',      v: t.replies    || 0, color:'#8e4b10',      sub:`${r.reply_rate||0}% rate` },
+    { l:'Failed',       v: t.failed     || 0, color:(t.failed||0)>0?'#c2410c':'var(--text)', danger:(t.failed||0)>0 },
   ];
 
   return (
