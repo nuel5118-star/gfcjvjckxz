@@ -422,9 +422,153 @@ select.input { cursor: pointer; }
 }
 
 /* Responsive */
+/* ── MOBILE RESPONSIVE ─────────────────────────────────────────────────────── */
+
+/* Mobile hamburger button — hidden on desktop */
+.mobile-menu-btn {
+  display: none;
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 300;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Sidebar overlay for mobile */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 199;
+}
+
 @media (max-width: 768px) {
-  .sidebar { display: none; }
-  .main { margin-left: 0; }
-  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  /* Show hamburger */
+  .mobile-menu-btn { display: flex; }
+
+  /* Sidebar slides in from left */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    width: 240px;
+    box-shadow: var(--shadow-md);
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+  .sidebar-overlay.open {
+    display: block;
+  }
+
+  /* Main content takes full width, add top padding for hamburger */
+  .main {
+    margin-left: 0;
+    padding-top: 0;
+  }
+
+  /* Topbar: stack title and actions vertically, add left padding for hamburger */
+  .topbar {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px 12px 12px 56px;
+    min-height: unset;
+  }
+  .topbar > div:first-child { flex: 1; min-width: 0; }
+  .topbar > div:last-child {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .topbar-title { font-size: 15px; }
+
+  /* Page padding */
+  .page { padding: 12px; }
+
+  /* Stat cards: 2 columns on mobile */
+  .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .stat-card { padding: 12px; }
+  .stat-value { font-size: 22px; }
+
+  /* Inline stat grids (the ones set via inline style) */
+  div[style*="repeat(6"] { grid-template-columns: repeat(2, 1fr) !important; }
+  div[style*="repeat(7"] { grid-template-columns: repeat(2, 1fr) !important; }
+  div[style*="repeat(4"] { grid-template-columns: repeat(2, 1fr) !important; }
+  div[style*="repeat(3"] { grid-template-columns: repeat(2, 1fr) !important; }
+
+  /* Cards */
+  .card { padding: 14px; border-radius: var(--radius); }
+
+  /* Tables: horizontal scroll with sticky first column */
+  .table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: var(--radius);
+  }
+  table { min-width: 600px; }
+  th, td { padding: 10px 12px; font-size: 12px; white-space: nowrap; }
+
+  /* Buttons: full width on mobile in forms */
+  .btn-block-mobile { width: 100%; justify-content: center; }
+
+  /* Input/select full width */
+  .input { font-size: 16px; } /* 16px prevents iOS zoom on focus */
+
+  /* Form rows: single column */
   .form-row { grid-template-columns: 1fr; }
+  .form-group { margin-bottom: 12px; }
+
+  /* Pagination */
+  .pagination { padding: 12px; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .page-info { font-size: 12px; width: 100%; text-align: center; order: -1; }
+
+  /* Modal: full screen on mobile */
+  div[style*="maxWidth:720"] {
+    max-width: 100% !important;
+    max-height: 100vh !important;
+    border-radius: 0 !important;
+    height: 100vh;
+  }
+
+  /* Campaign builder steps: full width */
+  div[style*="minWidth:340"] { min-width: unset !important; width: 100% !important; }
+
+  /* Queue page tabs: scrollable */
+  div[style*="display:'flex'"][style*="borderBottom"] { overflow-x: auto; }
+
+  /* Hide less important table columns on very small screens */
+  @media (max-width: 480px) {
+    .col-hide-xs { display: none; }
+    div[style*="repeat(2"] { grid-template-columns: 1fr 1fr !important; }
+  }
+
+  /* Log/debug page */
+  pre, code { font-size: 11px; }
+
+  /* Scheduler activity log */
+  .log-detail { font-size: 11px; word-break: break-all; }
+
+  /* Topbar action buttons: wrap and shrink */
+  .topbar .btn { font-size: 12px; padding: 6px 10px; }
+  .topbar select, .topbar .input { font-size: 13px; }
+
+  /* Dashboard stats layout */
+  .stats-row { flex-direction: column; gap: 10px; }
+
+  /* Bottom safe area for iOS */
+  .main { padding-bottom: env(safe-area-inset-bottom, 0); }
 }
