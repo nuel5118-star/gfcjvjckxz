@@ -1126,46 +1126,107 @@ async function runScheduler(manual=false){
 
       for(const campaign of activeCampaigns){
         if((await getTotalDailyCount(settingsTz)+totalSentThisRun)>=dailyCap)break;
-        if(!activeCampaignIds.includes(campaign.id))continue;// campaign may have ended
+        if(!activeCampaignIds.includes(campaign.id))continue;
 
         const tz=campaign.timezone||'America/New_York';
         const hs=parseInt(campaign.send_hour_start)||9;
         const he=parseInt(campaign.send_hour_end)||17;
+        const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+        const nowInTz=new Date(now.toLocaleString('en-US',{timeZone:tz}));
+        const currentHour=nowInTz.getHours()+(nowInTz.getMinutes()/60);
 
-        // Check if this campaign's window is open RIGHT NOW.
-        // We use the CAMPAIGN-level window here to decide whether to process
-        // this campaign at all. Per-step windows are checked per-contact below.
+        // ── FOLLOW-UPS FIRST (step > 1) ──────────────────────────────────────
+        // Check if any follow-up step window is open right now.
+        // Follow-ups take higher priority than new contacts.
+        // If follow-ups are due but their window is not open yet — we do NOT
+        // fall through to new contacts. We wait. Follow-ups go first.
+        const followupSteps=steps.filter(s=>s.step_number>1);
+        const newContactStep=steps.find(s=>s.step_number===1);
+
+        // Check if any follow-up window is open right now
+        let followupWindowOpen=false;
         if(!manual){
-          const nowInTz=new Date(now.toLocaleString('en-US',{timeZone:tz}));
-          const currentHour=nowInTz.getHours()+(nowInTz.getMinutes()/60);
-          // Build a combined window that covers ALL steps in this campaign
-          // so we don't skip the campaign just because step 1's window is 9-11
-          // when step 3's window is 2-4 and it's currently 3pm.
-          const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
-          const allWindowStarts=[hs,...steps.filter(s=>s.send_hour_start).map(s=>parseInt(s.send_hour_start))];
-          const allWindowEnds=[he,...steps.filter(s=>s.send_hour_end).map(s=>parseInt(s.send_hour_end))];
-          const earliestStart=Math.min(...allWindowStarts);
-          const latestEnd=Math.max(...allWindowEnds);
-          const anyCampaignWindowOpen=currentHour>=earliestStart&&currentHour<latestEnd;
-          if(!anyCampaignWindowOpen){
+          for(const fs of followupSteps){
+            const fsHs=fs.send_hour_start?parseInt(fs.send_hour_start):hs;
+            const fsHe=fs.send_hour_end?parseInt(fs.send_hour_end):he;
+            if(currentHour>=fsHs&&currentHour<fsHe){followupWindowOpen=true;break;}
+          }
+        }else{
+          followupWindowOpen=true;// manual trigger ignores windows
+        }
+
+        // Check if there are any follow-ups actually due right now
+        const{count:followupsDueCount}=await supabase.from('contacts')
+          .select('id',{count:'exact',head:true})
+          .eq('status','active')
+          .eq('campaign_id',campaign.id)
+          .gt('current_step',1)
+          .lte('next_send_at',now.toISOString())
+          .not('next_send_at','is',null);
+
+        const hasFollowupsDue=(followupsDueCount||0)>0;
+
+        // Decision tree:
+        // 1. Follow-ups due + window open → send follow-ups, skip new contacts this run
+        // 2. Follow-ups due + window NOT open → skip entire campaign, wait for follow-up window
+        // 3. No follow-ups due → check new contact window, send step 1 if open
+        if(hasFollowupsDue&&!followupWindowOpen&&!manual){
+          // Follow-ups are waiting but their window isn't open yet — skip new contacts too
+          // Follow-ups take priority so new contacts must wait
+          await logSchedulerActivity('skip',
+            `Campaign "${campaign.name}" — ${followupsDueCount} follow-ups due but window not open yet. Holding new contacts too until follow-up window opens.`,
+            {campaign:campaign.name,followups_due:followupsDueCount},runId
+          );
+          continue;
+        }
+
+        // Determine what to fetch:
+        // If follow-ups are due and window is open → fetch follow-ups only (step > 1)
+        // If no follow-ups due → fetch new contacts (step 1) if their window is open
+        let minStep=1;
+        let maxStep=999;
+        let windowCheckHs=hs;
+        let windowCheckHe=he;
+
+        if(hasFollowupsDue){
+          // Only process follow-ups this run
+          minStep=2;
+          maxStep=999;
+          await logSchedulerActivity('info',
+            `Campaign "${campaign.name}" — ${followupsDueCount} follow-ups due. Processing follow-ups only.`,
+            {campaign:campaign.name},runId
+          );
+        }else{
+          // No follow-ups — process new contacts if their window is open
+          minStep=1;
+          maxStep=1;
+          const step1Hs=newContactStep?.send_hour_start?parseInt(newContactStep.send_hour_start):hs;
+          const step1He=newContactStep?.send_hour_end?parseInt(newContactStep.send_hour_end):he;
+          windowCheckHs=step1Hs;
+          windowCheckHe=step1He;
+          if(!manual&&(currentHour<step1Hs||currentHour>=step1He)){
             await logSchedulerActivity('skip',
-              `Campaign "${campaign.name}" — no windows open right now (earliest: ${earliestStart}:00, latest end: ${latestEnd}:00 ${tz}, now: ${nowInTz.getHours()}:${String(nowInTz.getMinutes()).padStart(2,'0')})`,
-              {campaign:campaign.name,tz},runId
+              `Campaign "${campaign.name}" — no follow-ups due. New contact window not open yet (${step1Hs}:00–${step1He}:00 ${tz}, now: ${nowInTz.getHours()}:${String(nowInTz.getMinutes()).padStart(2,'0')})`,
+              {campaign:campaign.name},runId
             );
             continue;
           }
+          await logSchedulerActivity('info',
+            `Campaign "${campaign.name}" — no follow-ups due. Processing new contacts (step 1).`,
+            {campaign:campaign.name},runId
+          );
         }
 
-        // Window is open — fetch this campaign's due contacts
+        // Fetch the right contacts
         const{data:batch,error:queryError}=await supabase.from('contacts')
           .select('id,email,first_name,last_name,company,custom_fields,current_step,next_send_at,assigned_inbox,campaign_id')
           .eq('status','active')
           .eq('campaign_id',campaign.id)
+          .gte('current_step',minStep)
+          .lte('current_step',maxStep)
           .lte('next_send_at',now.toISOString())
           .not('next_send_at','is',null)
-          .gt('current_step',0)
-          // Follow-ups (step > 1) always before new contacts (step 1)
-          .order('current_step',{ascending:false})
+          .order('current_step',{ascending:false})// higher steps first within follow-ups
           .order('next_send_at',{ascending:true})
           .range(0,SCHEDULER_BATCH_SIZE-1);
 
@@ -1174,11 +1235,11 @@ async function runScheduler(manual=false){
           continue;
         }
         if(!batch?.length){
-          await logSchedulerActivity('info',`Campaign "${campaign.name}" — no contacts due right now`,{},runId);
+          await logSchedulerActivity('info',`Campaign "${campaign.name}" — no contacts due in this window`,{},runId);
           continue;
         }
 
-        await logSchedulerActivity('info',`Campaign "${campaign.name}" — ${batch.length} contacts due, window open (${hs}:00–${he}:00 ${tz})`,{},runId);
+        await logSchedulerActivity('info',`Campaign "${campaign.name}" — ${batch.length} contacts to process`,{},runId);
 
         const emailBatch=[];
         const batchMeta=[];
@@ -1195,7 +1256,6 @@ async function runScheduler(manual=false){
           if(inboxUsedToday>=hardInboxCap){
             result.skipped++;
             result.skip_reasons.inbox_at_hard_cap=(result.skip_reasons.inbox_at_hard_cap||0)+1;
-            await logSchedulerActivity('skip',`Inbox ${inbox} at hard cap (${inboxUsedToday}/${hardInboxCap}) — skipping ${contact.email}`,{},runId);
             continue;
           }
 
@@ -1237,28 +1297,6 @@ async function runScheduler(manual=false){
           if(!step){
             await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);
             result.skipped++;result.skip_reasons.sequence_complete=(result.skip_reasons.sequence_complete||0)+1;continue;
-          }
-
-          // ── PER-STEP WINDOW CHECK ───────────────────────────────────────────
-          // Use THIS STEP's send hours if set. Fall back to campaign hours if not.
-          // This means step 1 (9-11am) and step 3 (2-4pm) use their own windows.
-          // A contact on step 3 at 3pm is NOT blocked by the campaign's 9-11 window.
-          if(!manual){
-            const stepHs=step.send_hour_start?parseInt(step.send_hour_start):hs;
-            const stepHe=step.send_hour_end?parseInt(step.send_hour_end):he;
-            const nowInTz=new Date(now.toLocaleString('en-US',{timeZone:tz}));
-            const currentHour=nowInTz.getHours()+(nowInTz.getMinutes()/60);
-            const inStepWindow=currentHour>=stepHs&&currentHour<stepHe;
-            if(!inStepWindow){
-              // Reschedule into THIS STEP's correct window — not the campaign window
-              let nextSend=getScheduledTime(now,0,stepHs,stepHe,campaign.skip_weekends,tz);
-              if(isBefore(nextSend,now))nextSend=getScheduledTime(now,1,stepHs,stepHe,campaign.skip_weekends,tz);
-              nextSend=addMinutes(nextSend,Math.floor(Math.random()*(campaign.random_delay_max||30)));
-              await supabase.from('contacts').update({next_send_at:nextSend.toISOString()}).eq('id',contact.id);
-              result.skipped++;
-              result.skip_reasons.outside_step_window=(result.skip_reasons.outside_step_window||0)+1;
-              continue;
-            }
           }
 
           if(campaign.start_date){const sd=new Date(campaign.start_date+'T12:00:00');if(isBefore(now,sd)){result.skipped++;result.skip_reasons.campaign_not_started=(result.skip_reasons.campaign_not_started||0)+1;continue;}}
