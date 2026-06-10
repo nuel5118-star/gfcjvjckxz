@@ -1,4 +1,5 @@
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
+import { useState } from 'react';
+import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
 import Dashboard from './Dashboard.jsx';
 import Campaigns from './Campaigns.jsx';
 import CampaignBuilder from './CampaignBuilder.jsx';
@@ -28,76 +29,102 @@ const I = {
   reply: <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M3 10h10a8 8 0 018 8v2M3 10l6-6M3 10l6 6"/></svg>,
 };
 
-function Sidebar() {
+function Sidebar({ open, onClose }) {
+  const location = useLocation();
+  // Close sidebar on navigation on mobile
   const nav = (to, icon, label, end = false) => (
-    <NavLink to={to} end={end} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+    <NavLink to={to} end={end} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`} onClick={onClose}>
       {icon}{label}
     </NavLink>
   );
   return (
-    <aside className="sidebar">
-      <div className="sidebar-logo">
-        <div className="logo-icon">B</div>
-        <div>
-          <div className="logo-name">BotCipher Mail</div>
-          <div className="logo-sub">Email Sequencer</div>
+    <>
+      {/* Overlay — tap to close */}
+      <div className={`sidebar-overlay${open ? ' open' : ''}`} onClick={onClose} />
+      <aside className={`sidebar${open ? ' open' : ''}`}>
+        <div className="sidebar-logo">
+          <div className="logo-icon">B</div>
+          <div>
+            <div className="logo-name">BotCipher Mail</div>
+            <div className="logo-sub">Email Sequencer</div>
+          </div>
         </div>
-      </div>
-      <nav className="sidebar-nav">
-        <div className="nav-label">Main</div>
-        {nav('/', I.grid, 'Dashboard', true)}
-        {nav('/campaigns', I.mail, 'Campaigns')}
-        {nav('/contacts', I.users, 'Contacts')}
-        {nav('/analytics', I.chart, 'Analytics')}
-        {nav('/queue', I.queue, 'Queue')}
-        <div className="nav-label" style={{ marginTop: 16 }}>Config</div>
-        {nav('/inboxes', I.inbox, 'Inboxes')}
-        {nav('/blacklist', I.ban, 'Blacklist')}
-        {nav('/settings', I.cog, 'Settings')}
-        <div className="nav-label" style={{ marginTop: 16 }}>Leads</div>
-        {nav('/calculator-leads', I.calc, 'Calculator Leads')}
-        {nav('/replies', I.reply, 'Replies')}
-        <div className="nav-label" style={{ marginTop: 16 }}>Debug</div>
-        {nav('/logs', I.logs, 'Error Logs')}
-      </nav>
-      <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>v3.1 · Production</div>
-    </aside>
+        <nav className="sidebar-nav">
+          <div className="nav-label">Main</div>
+          {nav('/', I.grid, 'Dashboard', true)}
+          {nav('/campaigns', I.mail, 'Campaigns')}
+          {nav('/contacts', I.users, 'Contacts')}
+          {nav('/analytics', I.chart, 'Analytics')}
+          {nav('/queue', I.queue, 'Queue')}
+          <div className="nav-label" style={{ marginTop: 16 }}>Config</div>
+          {nav('/inboxes', I.inbox, 'Inboxes')}
+          {nav('/blacklist', I.ban, 'Blacklist')}
+          {nav('/settings', I.cog, 'Settings')}
+          <div className="nav-label" style={{ marginTop: 16 }}>Leads</div>
+          {nav('/calculator-leads', I.calc, 'Calculator Leads')}
+          {nav('/replies', I.reply, 'Replies')}
+          <div className="nav-label" style={{ marginTop: 16 }}>Debug</div>
+          {nav('/logs', I.logs, 'Error Logs')}
+        </nav>
+        <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>v3.1 · Production</div>
+      </aside>
+    </>
+  );
+}
+
+function AppInner() {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  return (
+    <div className="layout">
+      {/* Hamburger button — only visible on mobile via CSS */}
+      <button
+        className="mobile-menu-btn"
+        onClick={() => setSidebarOpen(o => !o)}
+        aria-label="Open menu"
+      >
+        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        Menu
+      </button>
+
+      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+
+      <main className="main">
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/campaigns" element={<Campaigns />} />
+          <Route path="/campaigns/new" element={<CampaignBuilder />} />
+          <Route path="/campaigns/:id/edit" element={<CampaignBuilder />} />
+          <Route path="/campaigns/:id" element={<CampaignDetail />} />
+          <Route path="/campaigns/:id/import" element={<ImportWizard />} />
+          <Route path="/contacts" element={<ContactsPage />} />
+          <Route path="/analytics" element={<AnalyticsPage />} />
+          <Route path="/inboxes" element={<InboxesPage />} />
+          <Route path="/blacklist" element={<BlacklistPage />} />
+          <Route path="/queue" element={<QueuePage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/logs" element={<ErrorLogsPage />} />
+          <Route path="/calculator-leads" element={<CalculatorLeadsPage />} />
+          <Route path="/replies" element={<RepliesPage />} />
+          <Route path="*" element={
+            <div style={{ padding: 64, textAlign: 'center' }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>🔍</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)', marginBottom: 8 }}>Page not found</div>
+              <div style={{ fontSize: 14, color: 'var(--text-muted)', marginBottom: 24 }}>The page you're looking for doesn't exist</div>
+              <a href="/" className="btn btn-primary" style={{ display: 'inline-flex' }}>← Back to Dashboard</a>
+            </div>
+          } />
+        </Routes>
+      </main>
+    </div>
   );
 }
 
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="layout">
-        <Sidebar />
-        <main className="main">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/campaigns" element={<Campaigns />} />
-            <Route path="/campaigns/new" element={<CampaignBuilder />} />
-            <Route path="/campaigns/:id/edit" element={<CampaignBuilder />} />
-            <Route path="/campaigns/:id" element={<CampaignDetail />} />
-            <Route path="/campaigns/:id/import" element={<ImportWizard />} />
-            <Route path="/contacts" element={<ContactsPage />} />
-            <Route path="/analytics" element={<AnalyticsPage />} />
-            <Route path="/inboxes" element={<InboxesPage />} />
-            <Route path="/blacklist" element={<BlacklistPage />} />
-            <Route path="/queue" element={<QueuePage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/logs" element={<ErrorLogsPage />} />
-            <Route path="/calculator-leads" element={<CalculatorLeadsPage />} />
-            <Route path="/replies" element={<RepliesPage />} />
-            <Route path="*" element={
-              <div style={{ padding: 64, textAlign: 'center' }}>
-                <div style={{ fontSize: 48, marginBottom: 16 }}>🔍</div>
-                <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)', marginBottom: 8 }}>Page not found</div>
-                <div style={{ fontSize: 14, color: 'var(--text-muted)', marginBottom: 24 }}>The page you're looking for doesn't exist</div>
-                <a href="/" className="btn btn-primary" style={{ display: 'inline-flex' }}>← Back to Dashboard</a>
-              </div>
-            } />
-          </Routes>
-        </main>
-      </div>
+      <AppInner />
     </BrowserRouter>
   );
 }
