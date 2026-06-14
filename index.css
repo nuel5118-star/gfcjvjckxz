@@ -424,25 +424,40 @@ select.input { cursor: pointer; }
 /* Responsive */
 /* ── MOBILE RESPONSIVE ─────────────────────────────────────────────────────── */
 
-/* Mobile hamburger button — hidden on desktop */
-.mobile-menu-btn {
+/* Mobile header bar — hidden on desktop */
+.mobile-header {
   display: none;
   position: fixed;
-  top: 12px;
-  left: 12px;
-  z-index: 300;
+  top: 0; left: 0; right: 0;
+  height: 52px;
   background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  cursor: pointer;
-  box-shadow: var(--shadow);
+  border-bottom: 1px solid var(--border);
+  z-index: 300;
+  align-items: center;
+  padding: 0 16px;
+  gap: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+.mobile-header-logo {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.mobile-menu-btn {
+  display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 600;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  cursor: pointer;
   color: var(--text);
+  flex-shrink: 0;
 }
 
 /* Sidebar overlay for mobile */
@@ -450,125 +465,130 @@ select.input { cursor: pointer; }
   display: none;
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.4);
+  background: rgba(0,0,0,0.45);
   z-index: 199;
+  backdrop-filter: blur(2px);
 }
 
 @media (max-width: 768px) {
-  /* Show hamburger */
-  .mobile-menu-btn { display: flex; }
+  /* Show mobile header */
+  .mobile-header { display: flex; }
 
-  /* Sidebar slides in from left */
+  /* Push all content down below the fixed mobile header */
+  .main { margin-left: 0; padding-top: 52px; }
+
+  /* Sidebar slides in from left on mobile */
   .sidebar {
     position: fixed;
     top: 0; left: 0; bottom: 0;
-    z-index: 200;
+    z-index: 400;
     transform: translateX(-100%);
-    transition: transform 0.25s ease;
-    width: 240px;
-    box-shadow: var(--shadow-md);
+    transition: transform 0.22s cubic-bezier(0.4,0,0.2,1);
+    width: 260px;
+    box-shadow: 4px 0 24px rgba(0,0,0,0.15);
   }
-  .sidebar.open {
-    transform: translateX(0);
-  }
-  .sidebar-overlay.open {
-    display: block;
-  }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar-overlay.open { display: block; }
 
-  /* Main content takes full width, add top padding for hamburger */
-  .main {
-    margin-left: 0;
-    padding-top: 0;
-  }
-
-  /* Topbar: stack title and actions vertically, add left padding for hamburger */
+  /* Topbar: no left padding issues — mobile header handles navigation */
   .topbar {
     flex-wrap: wrap;
-    gap: 10px;
-    padding: 12px 12px 12px 56px;
+    gap: 8px;
+    padding: 12px 14px;
     min-height: unset;
+    border-bottom: 1px solid var(--border);
   }
   .topbar > div:first-child { flex: 1; min-width: 0; }
   .topbar > div:last-child {
     width: 100%;
+    display: flex;
     flex-wrap: wrap;
     gap: 6px;
   }
   .topbar-title { font-size: 15px; }
+  .topbar-sub { font-size: 11px; }
 
   /* Page padding */
-  .page { padding: 12px; }
-
-  /* Stat cards: 2 columns on mobile */
-  .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .stat-card { padding: 12px; }
-  .stat-value { font-size: 22px; }
-
-  /* Inline stat grids (the ones set via inline style) */
-  div[style*="repeat(6"] { grid-template-columns: repeat(2, 1fr) !important; }
-  div[style*="repeat(7"] { grid-template-columns: repeat(2, 1fr) !important; }
-  div[style*="repeat(4"] { grid-template-columns: repeat(2, 1fr) !important; }
-  div[style*="repeat(3"] { grid-template-columns: repeat(2, 1fr) !important; }
+  .page { padding: 12px 14px 32px; }
 
   /* Cards */
-  .card { padding: 14px; border-radius: var(--radius); }
+  .card { padding: 14px; }
 
-  /* Tables: horizontal scroll with sticky first column */
+  /* Stat cards: 2 columns */
+  .stats-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 8px; }
+  .stat-card { padding: 12px 10px; }
+  .stat-value { font-size: 20px; }
+  .stat-label { font-size: 10px; }
+
+  /* Override inline grid styles used in pages */
+  [style*="repeat(6,"] > *, [style*="repeat(7,"] > *,
+  [style*="repeat(6, "] > *, [style*="repeat(7, "] > * { min-width: 0; }
+
+  /* Tables: horizontal scroll */
   .table-wrap {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-    border-radius: var(--radius);
   }
-  table { min-width: 600px; }
-  th, td { padding: 10px 12px; font-size: 12px; white-space: nowrap; }
+  table { min-width: 540px; font-size: 12px; }
+  th { font-size: 10px; padding: 8px 10px; }
+  td { padding: 8px 10px; white-space: nowrap; }
 
-  /* Buttons: full width on mobile in forms */
-  .btn-block-mobile { width: 100%; justify-content: center; }
+  /* Inputs: 16px prevents iOS auto-zoom */
+  input, select, textarea { font-size: 16px !important; }
 
-  /* Input/select full width */
-  .input { font-size: 16px; } /* 16px prevents iOS zoom on focus */
-
-  /* Form rows: single column */
-  .form-row { grid-template-columns: 1fr; }
+  /* Forms */
+  .form-row { grid-template-columns: 1fr !important; }
   .form-group { margin-bottom: 12px; }
 
-  /* Pagination */
-  .pagination { padding: 12px; gap: 6px; flex-wrap: wrap; justify-content: center; }
-  .page-info { font-size: 12px; width: 100%; text-align: center; order: -1; }
-
-  /* Modal: full screen on mobile */
-  div[style*="maxWidth:720"] {
-    max-width: 100% !important;
-    max-height: 100vh !important;
-    border-radius: 0 !important;
-    height: 100vh;
-  }
-
-  /* Campaign builder steps: full width */
-  div[style*="minWidth:340"] { min-width: unset !important; width: 100% !important; }
-
-  /* Queue page tabs: scrollable */
-  div[style*="display:'flex'"][style*="borderBottom"] { overflow-x: auto; }
-
-  /* Hide less important table columns on very small screens */
-  @media (max-width: 480px) {
-    .col-hide-xs { display: none; }
-    div[style*="repeat(2"] { grid-template-columns: 1fr 1fr !important; }
-  }
-
-  /* Log/debug page */
-  pre, code { font-size: 11px; }
-
-  /* Scheduler activity log */
-  .log-detail { font-size: 11px; word-break: break-all; }
-
-  /* Topbar action buttons: wrap and shrink */
+  /* Buttons */
+  .btn { font-size: 13px; }
   .topbar .btn { font-size: 12px; padding: 6px 10px; }
-  .topbar select, .topbar .input { font-size: 13px; }
+  .topbar select { max-width: 160px; }
 
-  /* Dashboard stats layout */
-  .stats-row { flex-direction: column; gap: 10px; }
+  /* Pagination */
+  .pagination {
+    padding: 10px 14px;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .page-info {
+    font-size: 11px;
+    width: 100%;
+    text-align: center;
+    order: -1;
+    color: var(--text-muted);
+  }
 
-  /* Bottom safe area for iOS */
-  .main { padding-bottom: env(safe-area-inset-bottom, 0); }
+  /* Modal: full screen */
+  .modal-overlay {
+    padding: 0 !important;
+    align-items: flex-end !important;
+  }
+  .modal-box {
+    max-width: 100% !important;
+    width: 100% !important;
+    max-height: 92vh !important;
+    border-radius: 16px 16px 0 0 !important;
+  }
+
+  /* Campaign builder steps */
+  .step-card { min-width: unset !important; width: 100% !important; }
+
+  /* Queue tabs: scrollable row */
+  .tab-row { overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
+  .tab-row::-webkit-scrollbar { display: none; }
+
+  /* Safe area bottom (iPhone home indicator) */
+  .main { padding-bottom: max(32px, env(safe-area-inset-bottom)); }
+
+  /* Hide non-critical columns on small screens */
+  .col-hide-mobile { display: none !important; }
+}
+
+/* Extra small screens */
+@media (max-width: 400px) {
+  .topbar > div:last-child { gap: 4px; }
+  .btn { padding: 6px 10px; font-size: 12px; }
+  .page { padding: 10px 10px 32px; }
 }
