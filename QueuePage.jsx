@@ -116,12 +116,16 @@ export default function QueuePage() {
     return () => clearInterval(intervalRef.current);
   }, [autoRefresh]);
 
-  // FIX: handleTrigger handles 409 (already running) explicitly and shows what happened
-  const handleTrigger = async () => {
+  // FIX: handleTrigger accepts optional campaign_id — when force sending, only that campaign runs
+  const handleTrigger = async (campaignId = null) => {
     setTriggering(true);
     setRunResult(null);
     try {
-      const res = await fetch(`${BASE}/scheduler/run`, { method:'POST', headers:{'Content-Type':'application/json'} });
+      const res = await fetch(`${BASE}/scheduler/run`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(campaignId ? { campaign_id: campaignId } : {})
+      });
       if (res.status === 409) {
         setRunResult({ sent:0, skipped:0, errors:0, reason:'already_running' });
         return;
@@ -153,11 +157,12 @@ export default function QueuePage() {
     catch (e) { alert(e.message); }
   };
 
-  const handleSendNow = async (contactId, email) => {
-    if (!confirm(`Reschedule ${email} to send in the next scheduler tick?`)) return;
+  const handleSendNow = async (contactId, email, campaignId) => {
+    if (!confirm(`Force send to ${email} right now?\n\nOnly this contact's campaign will run.`)) return;
     try {
       await req('POST', `/contacts/${contactId}/send-now`);
-      await handleTrigger();
+      // FIX: pass campaignId — only that campaign runs, not all active campaigns
+      await handleTrigger(campaignId);
     } catch (e) { alert(e.message); }
   };
 
@@ -170,13 +175,13 @@ export default function QueuePage() {
   const handleForceSendCampaign = async () => {
     if (!forceSendCampaignId) return alert('Select a campaign first');
     const camp = campaigns.find(c => c.id === forceSendCampaignId);
-    if (!confirm(`Force send ALL active contacts in "${camp?.name}" right now?\n\nThis overrides their scheduled times.`)) return;
+    if (!confirm(`Force send active contacts in "${camp?.name}" right now?\n\nOnly contacts in this campaign will be processed.`)) return;
     setForceSending(true);
     try {
       const res = await req('POST', `/campaigns/${forceSendCampaignId}/send-now`);
-      // FIX: removed blocking alert() here — it caused race with cron. Just log and trigger.
-      console.log(`[ForceSend] ${res.rescheduled} contacts rescheduled`);
-      await handleTrigger();
+      console.log(`[ForceSend] ${res.rescheduled} contacts rescheduled in "${camp?.name}"`);
+      // Pass campaign_id so scheduler ONLY processes this campaign
+      await handleTrigger(forceSendCampaignId);
     } catch (e) { alert(e.message); }
     finally { setForceSending(false); }
   };
@@ -386,7 +391,7 @@ export default function QueuePage() {
                           <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{c.assigned_inbox || '—'}</td>
                           <td><span className={`badge ${isOverdue ? 'badge-bounced' : 'badge-active'}`}>{isOverdue ? 'overdue' : 'scheduled'}</span></td>
                           <td>
-                            <button onClick={() => handleSendNow(c.id, c.email)} className="btn btn-primary btn-sm" style={{ fontSize: 11 }}>
+                            <button onClick={() => handleSendNow(c.id, c.email, c.campaign_id)} className="btn btn-primary btn-sm" style={{ fontSize: 11 }}>
                               Send now
                             </button>
                           </td>
