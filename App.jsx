@@ -76,17 +76,21 @@ function AppInner() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   return (
     <div className="layout">
-      {/* Hamburger button — only visible on mobile via CSS */}
-      <button
-        className="mobile-menu-btn"
-        onClick={() => setSidebarOpen(o => !o)}
-        aria-label="Open menu"
-      >
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-        Menu
-      </button>
+      {/* Mobile header bar — sits at top, only visible on mobile via CSS */}
+      <div className="mobile-header">
+        <button
+          className="mobile-menu-btn"
+          onClick={() => setSidebarOpen(o => !o)}
+          aria-label="Open navigation menu"
+        >
+          <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+        </button>
+        <span className="mobile-header-logo">BotCipher Mail</span>
+      </div>
 
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
