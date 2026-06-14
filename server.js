@@ -1695,4 +1695,11 @@ app.get('/api/replies', async (req, res) => {
     ...e,
     contact: contactMap[normalizeEmail(e.recipient || '')] || null,
   }));
+res.json({ replies, total: count || 0, page, pageSize });
+});
 
+app.use(express.static(path.join(__dirname,'dist')));
+app.get('*',(req,res)=>{if(req.path.startsWith('/api')||req.path.startsWith('/track'))return res.status(404).json({error:'Not found'});res.sendFile(path.join(__dirname,'dist/index.html'));});
+
+const PORT=process.env.PORT||3001;
+app.listen(PORT,()=>console.log(`BotCipher Mail running on port ${PORT}`));
