@@ -1051,12 +1051,12 @@ let lastSchedulerRun=null;
 let schedulerRunning=false;
 let lastRunResult=null;
 
-async function runScheduler(manual=false){
+async function runScheduler(manual=false,forceCampaignId=null){
   if(schedulerRunning){console.log('[Scheduler] Already running, skipping');return{skipped:true,reason:'already_running'};}
   schedulerRunning=true;lastSchedulerRun=new Date();
   const runId=generateRunId();
   const result={run_id:runId,sent:0,skipped:0,errors:0,skip_reasons:{},reason:null};
-  await logSchedulerActivity('info',`Scheduler started (${manual?'manual':'cron'})`,{manual},runId);
+  await logSchedulerActivity('info',`Scheduler started (${manual?'manual':'cron'})${forceCampaignId?` — forced for campaign ${forceCampaignId}`:''}`,{manual,forceCampaignId},runId);
   try{
     const settings=await getSettings();
     if(!settings.webhook_url){result.reason='no_webhook';await logSchedulerActivity('warn','No webhook URL configured — go to Settings to add one.',{},runId);return result;}
@@ -1065,9 +1065,16 @@ async function runScheduler(manual=false){
     const dailyCap=settings.daily_cap||500;
     if(totalToday>=dailyCap){result.reason='daily_cap_reached';await logSchedulerActivity('warn',`Daily cap reached: ${totalToday}/${dailyCap} sent today`,{sent:totalToday,cap:dailyCap},runId);return result;}
 
-    const{data:activeCampaigns,error:campError}=await supabase.from('campaigns').select('id,name,status,timezone,send_hour_start,send_hour_end,skip_weekends,per_inbox_cap,max_new_leads_per_day,random_delay_max,start_date,end_date,campaign_steps(*)').eq('status','active');
+    const{data:allActiveCampaigns,error:campError}=await supabase.from('campaigns').select('id,name,status,timezone,send_hour_start,send_hour_end,skip_weekends,per_inbox_cap,max_new_leads_per_day,random_delay_max,start_date,end_date,campaign_steps(*)').eq('status','active');
     if(campError){result.reason='db_error';await logSchedulerActivity('error',`Failed to fetch active campaigns: ${campError.message}`,{},runId);return result;}
-    if(!activeCampaigns?.length){result.reason='no_active_campaigns';await logSchedulerActivity('warn','No active campaigns found.',{},runId);return result;}
+    if(!allActiveCampaigns?.length){result.reason='no_active_campaigns';await logSchedulerActivity('warn','No active campaigns found.',{},runId);return result;}
+
+    // If forceCampaignId is set, only process that one campaign — ignore all others
+    const activeCampaigns=forceCampaignId
+      ? allActiveCampaigns.filter(c=>c.id===forceCampaignId)
+      : allActiveCampaigns;
+
+    if(!activeCampaigns.length){result.reason='campaign_not_found';await logSchedulerActivity('warn',`Force send campaign ${forceCampaignId} not found or not active`,{},runId);return result;}
 
     const inboxes=await getInboxes();
     // Hard absolute cap per inbox — the number set in the Inboxes UI. NEVER exceeded.
@@ -1374,7 +1381,7 @@ async function runScheduler(manual=false){
   return result;
 }
 
-cron.schedule('*/5 * * * *',()=>runScheduler(false));
+cron.schedule('*/10 * * * *',()=>runScheduler(false));
 
 // ── STARTUP: RESCHEDULE ALL OVERDUE CONTACTS ──────────────────────────────────
 // When the server starts (or restarts after a crash/deploy), any contacts whose
@@ -1441,7 +1448,9 @@ app.get('/api/scheduler/status',async(req,res)=>{
 
 app.post('/api/scheduler/run',async(req,res)=>{
   if(schedulerRunning)return res.status(409).json({ok:false,message:'Scheduler is already running — wait for it to finish'});
-  try{const result=await runScheduler(true);res.json({ok:true,message:'Scheduler run complete',result});}
+  // Optional campaign_id — if provided, only process that campaign (used by Force Send)
+  const{campaign_id}=req.body||{};
+  try{const result=await runScheduler(true,campaign_id||null);res.json({ok:true,message:'Scheduler run complete',result});}
   catch(e){res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -1687,11 +1696,3 @@ app.get('/api/replies', async (req, res) => {
     contact: contactMap[normalizeEmail(e.recipient || '')] || null,
   }));
 
-  res.json({ replies, total: count || 0, page, pageSize });
-});
-
-app.use(express.static(path.join(__dirname,'dist')));
-app.get('*',(req,res)=>{if(req.path.startsWith('/api')||req.path.startsWith('/track'))return res.status(404).json({error:'Not found'});res.sendFile(path.join(__dirname,'dist/index.html'));});
-
-const PORT=process.env.PORT||3001;
-app.listen(PORT,()=>console.log(`BotCipher Mail running on port ${PORT}`));
