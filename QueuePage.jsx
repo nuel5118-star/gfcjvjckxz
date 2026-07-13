@@ -367,7 +367,7 @@ export default function QueuePage() {
           <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
             <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: 'var(--text-secondary)' }}>
               🧪 Force Send Test Campaign (Immediate)
-              <span style={{ fontWeight: 400, marginLeft: 8, color: 'var(--text-muted)' }}>— sends right now, no delay, only the campaign you pick</span>
+              <span style={{ fontWeight: 400, marginLeft: 8, color: 'var(--text-muted)' }}>— bypasses all throttle gates (hours, caps, fair-share) and hits the webhook directly for the campaign you pick</span>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <select
