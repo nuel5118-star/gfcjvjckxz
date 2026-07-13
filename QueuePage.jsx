@@ -75,6 +75,8 @@ export default function QueuePage() {
   const [logFilter, setLogFilter] = useState('all');
   const [forceSendCampaignId, setForceSendCampaignId] = useState('');
   const [forceSending, setForceSending] = useState(false);
+  const [forceSendTestCampaignId, setForceSendTestCampaignId] = useState('');
+  const [forceSendTesting, setForceSendTesting] = useState(false);
   const [campaigns, setCampaigns] = useState([]);
   const [expandedLog, setExpandedLog] = useState(null);
   const intervalRef = useRef();
@@ -184,6 +186,25 @@ export default function QueuePage() {
       await handleTrigger(forceSendCampaignId);
     } catch (e) { alert(e.message); }
     finally { setForceSending(false); }
+  };
+
+  // Test force send — sends RIGHT NOW for one campaign only, no 30s delay.
+  // Calls a single backend endpoint that reschedules + runs the scheduler
+  // atomically server-side (scoped to this campaign_id), so there's no
+  // race between "reschedule" and "run" like the regular Force Send has.
+  const handleForceSendTestCampaign = async () => {
+    if (!forceSendTestCampaignId) return alert('Select a campaign first');
+    const camp = campaigns.find(c => c.id === forceSendTestCampaignId);
+    if (!confirm(`Send test now for active contacts in "${camp?.name}"?\n\nThis sends immediately — only contacts in this campaign will be processed.`)) return;
+    setForceSendTesting(true);
+    setRunResult(null);
+    try {
+      const res = await req('POST', `/campaigns/${forceSendTestCampaignId}/force-send-test`);
+      if (res.result) setRunResult(res.result);
+      await load();
+      if (tab === 'logs') await loadLogs();
+    } catch (e) { alert(e.message); }
+    finally { setForceSendTesting(false); }
   };
 
   const handleClearLogs = async () => {
@@ -335,6 +356,34 @@ export default function QueuePage() {
                 style={{ background: 'var(--warning)', borderColor: 'var(--warning)', color: '#000' }}
               >
                 {forceSending ? '⏳ Sending...' : '⚡ Force Send Now'}
+              </button>
+            </div>
+            {campaigns.length === 0 && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>No active campaigns found.</div>
+            )}
+          </div>
+
+          {/* Test Force Send — sends immediately, same-request, no race window */}
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: 'var(--text-secondary)' }}>
+              🧪 Force Send Test Campaign (Immediate)
+              <span style={{ fontWeight: 400, marginLeft: 8, color: 'var(--text-muted)' }}>— sends right now, no delay, only the campaign you pick</span>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <select
+                value={forceSendTestCampaignId}
+                onChange={e => setForceSendTestCampaignId(e.target.value)}
+                style={{ flex: 1, padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)', fontSize: 13, maxWidth: 340 }}
+              >
+                <option value="">Select active campaign…</option>
+                {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <button
+                onClick={handleForceSendTestCampaign}
+                disabled={forceSendTesting || !forceSendTestCampaignId}
+                className="btn btn-primary"
+              >
+                {forceSendTesting ? '⏳ Sending...' : '🧪 Send Test Now'}
               </button>
             </div>
             {campaigns.length === 0 && (
