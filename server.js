@@ -538,27 +538,20 @@ app.post('/api/campaigns/:id/send-now',async(req,res)=>{
   res.json({ok:true,rescheduled:count,message:`${count} contacts rescheduled — click Run Now to send immediately`});
 });
 
-// TEST FORCE-SEND — sends immediately, right now, for ONE campaign only.
-// Unlike /send-now (which schedules 30s out and relies on a *separate* client
-// call to /scheduler/run — a call that can race ahead of the 30s window and
-// find nothing due yet), this endpoint reschedules AND runs the scheduler
-// in a single request on the server, scoped only to this campaign_id via
-// forceCampaignId. Same eligibility filters as Force Send (status active,
-// current_step>0, next_send_at not null) so it only ever touches contacts
-// that belong to — and are ready in — the campaign you selected.
+// TEST FORCE-SEND — sends immediately, right now, for ONE campaign only,
+// bypassing every throttle/timing gate (business hours, daily cap, inbox
+// caps, fair-share cap, new-leads cap, next_send_at timing). Runs through
+// runForceSendTest() instead of runScheduler(), so it fires the webhook
+// directly. It still respects the compliance-critical checks — blacklist,
+// already-replied/bounced, sequence completion — and only ever touches
+// contacts in the campaign_id you selected.
 app.post('/api/campaigns/:id/force-send-test',async(req,res)=>{
   if(schedulerRunning)return res.status(409).json({ok:false,message:'Scheduler is already running — wait for it to finish'});
   const{data:campaign}=await supabase.from('campaigns').select('id,name,status').eq('id',req.params.id).single();
   if(!campaign)return res.status(404).json({error:'Campaign not found'});
   if(campaign.status!=='active')return res.status(400).json({error:`Campaign is "${campaign.status}", not active — activate it before test sending.`});
-  // Make eligible contacts due in the past (not +30s) so the run right below picks them up immediately
-  const sendAt=new Date(Date.now()-1000).toISOString();
-  const{data,error}=await supabase.from('contacts').update({next_send_at:sendAt}).eq('campaign_id',req.params.id).eq('status','active').gt('current_step',0).not('next_send_at','is',null).select('id');
-  if(error)return res.status(500).json({error:error.message});
-  const rescheduled=data?.length||0;
-  await logSchedulerActivity('info',`Force-send-test triggered for campaign "${campaign.name}" — sending immediately`,{campaign_id:req.params.id,contacts_rescheduled:rescheduled});
-  const result=await runScheduler(true,req.params.id);
-  res.json({ok:true,rescheduled,result,message:`${rescheduled} contact(s) made due — sent:${result.sent} skipped:${result.skipped} errors:${result.errors}`});
+  const result=await runForceSendTest(req.params.id);
+  res.json({ok:true,result,message:`sent:${result.sent} skipped:${result.skipped} errors:${result.errors}`});
 });
 
 // ANALYTICS
@@ -1073,6 +1066,122 @@ app.get('/api/email/bounce-stats',async(req,res)=>{
 let lastSchedulerRun=null;
 let schedulerRunning=false;
 let lastRunResult=null;
+
+// FORCE-SEND-TEST — bypasses every throttle/timing gate and posts straight to
+// the webhook for the selected campaign's eligible contacts. This is NOT the
+// same code path as runScheduler(). It intentionally skips:
+//   - business-hour send windows (step & campaign hour_start/hour_end)
+//   - global daily_cap
+//   - per-inbox hard cap
+//   - per-campaign fair-share-of-inbox cap
+//   - max_new_leads_per_day cap
+//   - next_send_at timing (doesn't matter if a contact isn't "due" yet)
+// It still keeps the checks that exist for compliance/data-integrity reasons,
+// not throttling reasons — these are never bypassed even in test mode:
+//   - campaign_id filter (only touches the campaign you selected)
+//   - status === 'active' AND current_step > 0 (already-launched contacts only)
+//   - blacklist
+//   - already replied / bounced / blacklisted / completed / removed
+//   - sequence actually has a step matching current_step
+async function runForceSendTest(campaignId){
+  const runId=generateRunId();
+  const result={run_id:runId,sent:0,skipped:0,errors:0,skip_reasons:{},reason:null};
+  await logSchedulerActivity('info',`[TEST] Force-send-test started — bypassing throttle gates`,{campaignId},runId);
+
+  const settings=await getSettings();
+  if(!settings.webhook_url){result.reason='no_webhook';await logSchedulerActivity('warn','[TEST] No webhook URL configured.',{},runId);return result;}
+
+  const{data:campaign}=await supabase.from('campaigns').select('*, campaign_steps(*)').eq('id',campaignId).single();
+  if(!campaign){result.reason='campaign_not_found';await logSchedulerActivity('warn',`[TEST] Campaign ${campaignId} not found`,{},runId);return result;}
+  const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
+
+  const inboxes=await getInboxes();
+
+  // Only eligibility filter is campaign + active + already launched (step > 0) —
+  // deliberately NOT filtering on next_send_at, since "force send test" means "now".
+  const contacts=await fetchAll(()=>supabase.from('contacts')
+    .select('id,email,first_name,last_name,company,custom_fields,current_step,assigned_inbox,campaign_id')
+    .eq('status','active')
+    .eq('campaign_id',campaignId)
+    .gt('current_step',0));
+
+  if(!contacts.length){result.reason='no_eligible_contacts';await logSchedulerActivity('info',`[TEST] Campaign "${campaign.name}" — no active launched contacts to send to`,{},runId);return result;}
+
+  const blacklistRows=await fetchAll(()=>supabase.from('blacklist').select('email'));
+  const blacklistSet=new Set(blacklistRows.map(r=>normalizeEmail(r.email)));
+  const repliedRows=await fetchAll(()=>supabase.from('email_events').select('recipient').in('type',['reply','replied']));
+  const repliedContactRows=await fetchAll(()=>supabase.from('contacts').select('email').in('status',['replied','bounced','blacklisted','completed','removed']));
+  const repliedSet=new Set([
+    ...repliedRows.map(r=>normalizeEmail(r.recipient)),
+    ...repliedContactRows.map(r=>normalizeEmail(r.email))
+  ]);
+
+  const emailBatch=[];const batchMeta=[];
+  let inboxIdx=0;
+
+  for(const contact of contacts){
+    const email=normalizeEmail(contact.email);
+    if(blacklistSet.has(email)){result.skipped++;result.skip_reasons.blacklisted=(result.skip_reasons.blacklisted||0)+1;continue;}
+    if(repliedSet.has(email)){result.skipped++;result.skip_reasons.already_replied=(result.skip_reasons.already_replied||0)+1;continue;}
+
+    const step=steps.find(s=>s.step_number===contact.current_step);
+    if(!step){
+      await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);
+      result.skipped++;result.skip_reasons.sequence_complete=(result.skip_reasons.sequence_complete||0)+1;continue;
+    }
+
+    let inbox=contact.assigned_inbox;
+    if(!inbox){
+      if(!inboxes.length){result.skipped++;result.skip_reasons.no_inbox_available=(result.skip_reasons.no_inbox_available||0)+1;continue;}
+      inbox=inboxes[inboxIdx%inboxes.length].email;inboxIdx++;
+    }
+
+    const customFields=contact.custom_fields||{};
+    const subject=applyVariables(processSpintax(step.subject),contact,customFields);
+    const rawBody=applyVariables(processSpintax(step.body),contact,customFields);
+    const sendId=randomUUID();
+    const trackedBody=injectTracking(rawBody,{email:contact.email,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:contact.current_step,send_id:sendId,subject});
+
+    const stepIndex=steps.findIndex(s=>s.step_number===contact.current_step);
+    const nextStep=steps[stepIndex+1];
+    let advancePayload;
+    if(nextStep){
+      const shs=nextStep.send_hour_start?parseInt(nextStep.send_hour_start):(campaign.send_hour_start||9);
+      const she=nextStep.send_hour_end?parseInt(nextStep.send_hour_end):(campaign.send_hour_end||17);
+      const tz=campaign.timezone||'America/New_York';
+      let nextSend=getScheduledTime(new Date(),nextStep.delay_days,shs,she,campaign.skip_weekends,tz);
+      nextSend=addMinutes(nextSend,Math.floor(Math.random()*(campaign.random_delay_max||30)));
+      advancePayload={current_step:nextStep.step_number,next_send_at:nextSend.toISOString(),assigned_inbox:inbox};
+    }else{
+      advancePayload={status:'completed',finished_at:new Date().toISOString(),next_send_at:null,assigned_inbox:inbox};
+    }
+
+    emailBatch.push({to:contact.email,subject,body:trackedBody,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:contact.current_step,send_id:sendId,first_name:contact.first_name,last_name:contact.last_name,company:contact.company});
+    batchMeta.push({sendId,campaign_id:campaign.id,contact_id:contact.id,email:contact.email,inbox,step_number:contact.current_step,subject,body:rawBody,campaign_name:campaign.name,advancePayload});
+  }
+
+  if(emailBatch.length>0){
+    await logSchedulerActivity('info',`[TEST] Firing webhook directly: ${emailBatch.length} emails for campaign "${campaign.name}" (throttle gates bypassed)`,{count:emailBatch.length},runId);
+    try{
+      await axios.post(settings.webhook_url,{batch:emailBatch},{timeout:60000});
+      for(const m of batchMeta){
+        await supabase.from('contacts').update(m.advancePayload).eq('id',m.contact_id);
+      }
+      await supabase.from('sequence_sends').insert(batchMeta.map(m=>({id:m.sendId,campaign_id:m.campaign_id,contact_id:m.contact_id,email:m.email,inbox:m.inbox,step_number:m.step_number,subject:m.subject,body:m.body,sent_at:new Date().toISOString(),status:'sent'})));
+      await supabase.from('email_events').insert(batchMeta.map(m=>({type:'send',recipient:m.email,inbox:m.inbox,campaign:m.campaign_name,campaign_id:m.campaign_id,contact_id:m.contact_id,step_number:m.step_number,send_id:m.sendId,subject:m.subject,created_at:new Date().toISOString()})));
+      result.sent+=emailBatch.length;
+      await logSchedulerActivity('send',`✓ [TEST] Sent ${emailBatch.length} emails for "${campaign.name}"`,{count:emailBatch.length,emails:emailBatch.map(e=>e.to)},runId);
+    }catch(webhookErr){
+      const errMsg=webhookErr.response?`HTTP ${webhookErr.response.status}: ${JSON.stringify(webhookErr.response.data)}`:webhookErr.message;
+      await supabase.from('sequence_sends').insert(batchMeta.map(m=>({id:m.sendId,campaign_id:m.campaign_id,contact_id:m.contact_id,email:m.email,inbox:m.inbox,step_number:m.step_number,subject:m.subject,body:m.body,sent_at:new Date().toISOString(),status:'failed',error_message:errMsg})));
+      result.errors+=emailBatch.length;
+      await logSchedulerActivity('error',`✗ [TEST] Webhook FAILED for "${campaign.name}": ${errMsg}`,{error:errMsg},runId);
+    }
+  }
+
+  await logSchedulerActivity('info',`[TEST] Run complete — sent:${result.sent} skipped:${result.skipped} errors:${result.errors}`,{...result,skip_breakdown:result.skip_reasons},runId);
+  return result;
+}
 
 async function runScheduler(manual=false,forceCampaignId=null){
   if(schedulerRunning){console.log('[Scheduler] Already running, skipping');return{skipped:true,reason:'already_running'};}
