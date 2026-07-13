@@ -538,6 +538,29 @@ app.post('/api/campaigns/:id/send-now',async(req,res)=>{
   res.json({ok:true,rescheduled:count,message:`${count} contacts rescheduled — click Run Now to send immediately`});
 });
 
+// TEST FORCE-SEND — sends immediately, right now, for ONE campaign only.
+// Unlike /send-now (which schedules 30s out and relies on a *separate* client
+// call to /scheduler/run — a call that can race ahead of the 30s window and
+// find nothing due yet), this endpoint reschedules AND runs the scheduler
+// in a single request on the server, scoped only to this campaign_id via
+// forceCampaignId. Same eligibility filters as Force Send (status active,
+// current_step>0, next_send_at not null) so it only ever touches contacts
+// that belong to — and are ready in — the campaign you selected.
+app.post('/api/campaigns/:id/force-send-test',async(req,res)=>{
+  if(schedulerRunning)return res.status(409).json({ok:false,message:'Scheduler is already running — wait for it to finish'});
+  const{data:campaign}=await supabase.from('campaigns').select('id,name,status').eq('id',req.params.id).single();
+  if(!campaign)return res.status(404).json({error:'Campaign not found'});
+  if(campaign.status!=='active')return res.status(400).json({error:`Campaign is "${campaign.status}", not active — activate it before test sending.`});
+  // Make eligible contacts due in the past (not +30s) so the run right below picks them up immediately
+  const sendAt=new Date(Date.now()-1000).toISOString();
+  const{data,error}=await supabase.from('contacts').update({next_send_at:sendAt}).eq('campaign_id',req.params.id).eq('status','active').gt('current_step',0).not('next_send_at','is',null).select('id');
+  if(error)return res.status(500).json({error:error.message});
+  const rescheduled=data?.length||0;
+  await logSchedulerActivity('info',`Force-send-test triggered for campaign "${campaign.name}" — sending immediately`,{campaign_id:req.params.id,contacts_rescheduled:rescheduled});
+  const result=await runScheduler(true,req.params.id);
+  res.json({ok:true,rescheduled,result,message:`${rescheduled} contact(s) made due — sent:${result.sent} skipped:${result.skipped} errors:${result.errors}`});
+});
+
 // ANALYTICS
 app.get('/api/campaigns/:id/analytics',async(req,res)=>{
   const cid=req.params.id;
