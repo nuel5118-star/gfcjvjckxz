@@ -97,41 +97,78 @@ function VarInserter({ onInsert }) {
   );
 }
 
-function SequencePicker({ sequences, onPick }) {
-  const [open, setOpen] = useState(false);
-  const [seqId, setSeqId] = useState('');
-  const seq = sequences.find(s => s.id === seqId);
+// Finds the library sequence-step (and its parent sequence) that a campaign
+// step was loaded from, using the id we stashed at load time. Looked up live
+// against `sequences` (not a snapshot) so the "edited" badge stays accurate
+// even after reopening the campaign later.
+function findSourceInfo(sequences, sourceStepId) {
+  if (!sourceStepId) return null;
+  for (const seq of sequences || []) {
+    const found = (seq.sequence_steps || []).find(ss => ss.id === sourceStepId);
+    if (found) return { sequence: seq, sequenceStep: found };
+  }
+  return null;
+}
 
+function SourceBadge({ step, sequences }) {
+  const info = findSourceInfo(sequences, step.source_sequence_step_id);
+  if (!info) return null;
+  const edited = step.subject !== info.sequenceStep.subject || step.body !== info.sequenceStep.body;
   return (
-    <div style={{ marginBottom: 10 }}>
-      <button type="button" onClick={() => setOpen(!open)} style={{ background:'none', border:'none', cursor:'pointer', fontSize:12, color:'var(--info)', padding:0 }}>
-        {open ? '▾' : '▸'} 📚 Load an email from a sequence
-      </button>
-      {open && (
-        <div style={{ display:'flex', gap:8, marginTop:8, flexWrap:'wrap', alignItems:'center' }}>
-          <select className="input" style={{ fontSize:12, maxWidth:220 }} value={seqId} onChange={e => setSeqId(e.target.value)}>
-            <option value="">— Choose a sequence —</option>
-            {sequences.map(s => <option key={s.id} value={s.id}>{s.name} ({(s.sequence_steps||[]).length} emails)</option>)}
-          </select>
-          {seq && (seq.sequence_steps||[]).map(ss => (
-            <button
-              key={ss.id}
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => { onPick(ss); setOpen(false); setSeqId(''); }}
-              title={ss.subject}
-            >
-              Email {ss.step_number}
-            </button>
-          ))}
-          {seq && (seq.sequence_steps||[]).length === 0 && <span style={{ fontSize:12, color:'var(--text-muted)' }}>This sequence has no emails yet</span>}
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700,
+      background: edited ? '#fff4e0' : 'var(--accent-light)', color: edited ? '#a15c00' : 'var(--accent)',
+      padding: '3px 9px', borderRadius: 20, whiteSpace: 'nowrap',
+    }}>
+      📚 From: {info.sequence.name} · Email {info.sequenceStep.step_number}{edited ? ' (edited)' : ''}
+    </span>
+  );
+}
+
+// Persistent sidebar — stays open the whole time you're building, so picking
+// an email never makes the library disappear. "Insert" always targets
+// whichever step card was last clicked/focused (activeStepIndex).
+function SequenceLibraryPanel({ sequences, activeStepIndex, totalSteps, onInsert }) {
+  if (!sequences || sequences.length === 0) {
+    return (
+      <div className="card" style={{ position: 'sticky', top: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>📚 Sequence Library</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          No sequences yet. Build one under the Sequences tab, then come back here to pull emails into this campaign.
         </div>
-      )}
+      </div>
+    );
+  }
+  return (
+    <div className="card" style={{ position: 'sticky', top: 16 }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>📚 Sequence Library</div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+        Tap an email card on the left to target it (highlighted below), then hit Insert.
+      </div>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 10, background: 'var(--accent-light)', color: 'var(--accent)', padding: '6px 10px', borderRadius: 8 }}>
+        Inserting into: Email {activeStepIndex + 1} of {totalSteps}
+      </div>
+      {sequences.map(seq => (
+        <div key={seq.id} style={{ border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', marginBottom: 12 }}>
+          <div style={{ background: 'var(--bg-muted)', padding: '7px 10px', fontSize: 12, fontWeight: 700 }}>{seq.name}</div>
+          {(seq.sequence_steps || []).length === 0 && (
+            <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-muted)' }}>No emails in this sequence yet</div>
+          )}
+          {(seq.sequence_steps || []).map(ss => (
+            <div key={ss.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 10px', fontSize: 12, borderTop: '1px solid var(--border)' }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 150 }} title={ss.subject}>
+                Email {ss.step_number} — {ss.subject || '(no subject)'}
+              </span>
+              <button type="button" onClick={() => onInsert(ss)} className="btn btn-secondary btn-sm" style={{ flexShrink: 0 }}>Insert →</button>
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
 
-function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown, campaignId, sequences }) {
+function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown, campaignId, sequences, isActive, onFocusStep }) {
   const [showPreview, setShowPreview] = useState(false);
   const [previewData, setPreviewData] = useState(null);
   const [testContact, setTestContact] = useState({ first_name:'John', last_name:'Smith', company:'Acme Plumbing', city:'Lagos', phone:'080-1234-5678', business_url:'acmeplumbing.com', timezone:'Africa/Lagos' });
@@ -190,13 +227,22 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
   const enabled = step.enabled !== false;
 
   return (
-    <div className="step-card" style={{ borderColor: showPreview ? 'var(--accent)' : undefined, opacity: enabled ? 1 : 0.55 }}>
+    <div
+      className="step-card"
+      onClick={() => onFocusStep(index)}
+      style={{
+        borderColor: isActive ? 'var(--accent)' : showPreview ? 'var(--accent)' : undefined,
+        boxShadow: isActive ? '0 0 0 2px var(--accent-light)' : undefined,
+        opacity: enabled ? 1 : 0.55,
+      }}
+    >
       {/* Header */}
-      <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14, flexWrap:'wrap' }}>
         <div className="step-number">{index + 1}</div>
-        <div style={{ flex:1 }}>
-          <div style={{ fontWeight:600, fontSize:13, display:'flex', alignItems:'center', gap:8 }}>
+        <div style={{ flex:1, minWidth:140 }}>
+          <div style={{ fontWeight:600, fontSize:13, display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
             Email {index + 1}
+            <SourceBadge step={step} sequences={sequences} />
             {!enabled && <span style={{ fontSize:10, background:'var(--bg-muted)', color:'var(--text-muted)', padding:'1px 7px', borderRadius:10, fontWeight:600 }}>OFF — will be skipped</span>}
           </div>
           <div style={{ fontSize:12, color:'var(--text-muted)' }}>
@@ -205,33 +251,17 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
         </div>
         <div style={{ display:'flex', alignItems:'center', gap:4 }}>
           <label style={{ display:'flex', alignItems:'center', gap:5, fontSize:11, color:'var(--text-muted)', marginRight:6, cursor:'pointer', userSelect:'none' }} title="Toggle this email off to skip it without deleting it — contacts jump straight to the next enabled email">
-            <input type="checkbox" className="checkbox" checked={enabled} onChange={e => onChange({ ...step, enabled: e.target.checked })} />
+            <input type="checkbox" className="checkbox" checked={enabled} onChange={e => { e.stopPropagation(); onChange({ ...step, enabled: e.target.checked }); }} onClick={e => e.stopPropagation()} />
             {enabled ? 'On' : 'Off'}
           </label>
-          <button type="button" onClick={() => onMoveUp(index)} disabled={index === 0} className="action-btn" title="Move up">▲</button>
-          <button type="button" onClick={() => onMoveDown(index)} disabled={index === total - 1} className="action-btn" title="Move down">▼</button>
-          <button type="button" onClick={() => { if (!showPreview) loadPreview(); setShowPreview(!showPreview); }} className="action-btn" style={{ color: showPreview ? 'var(--info)' : undefined }} title="Preview">
+          <button type="button" onClick={e => { e.stopPropagation(); onMoveUp(index); }} disabled={index === 0} className="action-btn" title="Move up">▲</button>
+          <button type="button" onClick={e => { e.stopPropagation(); onMoveDown(index); }} disabled={index === total - 1} className="action-btn" title="Move down">▼</button>
+          <button type="button" onClick={e => { e.stopPropagation(); if (!showPreview) loadPreview(); setShowPreview(!showPreview); }} className="action-btn" style={{ color: showPreview ? 'var(--info)' : undefined }} title="Preview">
             👁
           </button>
-          {total > 1 && <button type="button" onClick={() => onRemove(index)} className="action-btn danger">✕</button>}
+          {total > 1 && <button type="button" onClick={e => { e.stopPropagation(); onRemove(index); }} className="action-btn danger">✕</button>}
         </div>
       </div>
-
-      {/* Pull this email's content from a saved sequence */}
-      {sequences && sequences.length > 0 && (
-        <SequencePicker
-          sequences={sequences}
-          onPick={ss => onChange({
-            ...step,
-            subject: ss.subject,
-            body: ss.body,
-            delay_days: ss.delay_days || step.delay_days,
-            send_hour_start: ss.send_hour_start || null,
-            send_hour_end: ss.send_hour_end || null,
-            source_sequence_step_id: ss.id,
-          })}
-        />
-      )}
 
       {/* Variable pills with fallback editor */}
       <VarInserter onInsert={insertVar} />
@@ -342,6 +372,7 @@ export default function CampaignBuilder() {
   const [name, setName] = useState('');
   const [steps, setSteps] = useState([{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }]);
   const [sequences, setSequences] = useState([]);
+  const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [dailyCap, setDailyCap] = useState(500);
   const [perInboxCap, setPerInboxCap] = useState(100);
   const [maxNewLeads, setMaxNewLeads] = useState(0);
@@ -571,45 +602,66 @@ export default function CampaignBuilder() {
         </div>
 
         {/* Email sequence */}
-        <div style={{ marginBottom:16 }}>
-          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
-            <div style={{ fontWeight:700, fontSize:15 }}>
-              ✉️ Email Sequence
-              <span style={{ fontWeight:400, fontSize:12, color:'var(--text-muted)', marginLeft:8 }}>{steps.length} email{steps.length !== 1 ? 's' : ''}</span>
+        <div style={{ marginBottom:16, display:'flex', gap:20, alignItems:'flex-start', flexWrap:'wrap' }}>
+          <div style={{ flex:'1 1 480px', minWidth:0 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+              <div style={{ fontWeight:700, fontSize:15 }}>
+                ✉️ Email Sequence
+                <span style={{ fontWeight:400, fontSize:12, color:'var(--text-muted)', marginLeft:8 }}>{steps.length} email{steps.length !== 1 ? 's' : ''}</span>
+              </div>
+              {steps.length < 10 && (
+                <button type="button" onClick={() => setSteps(s => { const next = [...s, { subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }]; setActiveStepIndex(next.length - 1); return next; })} className="btn btn-secondary btn-sm">
+                  + Add Email
+                </button>
+              )}
             </div>
-            {steps.length < 10 && (
-              <button type="button" onClick={() => setSteps(s => [...s, { subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }])} className="btn btn-secondary btn-sm">
-                + Add Email
-              </button>
-            )}
-          </div>
 
-          {/* Visual timeline */}
-          <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:16, flexWrap:'wrap' }}>
-            {steps.map((s, i) => (
-              <div key={i} style={{ display:'flex', alignItems:'center', gap:6, opacity: s.enabled === false ? 0.45 : 1 }}>
-                <div style={{ padding:'6px 12px', borderRadius:8, border:`2px solid ${s.enabled === false ? 'var(--border)' : s.subject ? 'var(--accent)' : 'var(--border)'}`, background: s.enabled === false ? 'var(--bg)' : s.subject ? 'var(--accent-light)' : 'var(--bg)', fontSize:12, fontWeight:600, color: s.enabled === false ? 'var(--text-muted)' : s.subject ? 'var(--accent)' : 'var(--text-muted)', textAlign:'center' }}>
-                  <div>Email {i+1}{s.enabled === false ? ' (off)' : ''}</div>
-                  {i > 0 && <div style={{ fontSize:10, fontWeight:400, color:'var(--text-muted)' }}>+{s.delay_days}d</div>}
-                  {(s.send_hour_start || s.send_hour_end) && <div style={{ fontSize:9, color:'var(--info)' }}>{s.send_hour_start||'?'}–{s.send_hour_end||'?'}h</div>}
+            {/* Visual timeline */}
+            <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:16, flexWrap:'wrap' }}>
+              {steps.map((s, i) => (
+                <div key={i} style={{ display:'flex', alignItems:'center', gap:6, opacity: s.enabled === false ? 0.45 : 1 }}>
+                  <div style={{ padding:'6px 12px', borderRadius:8, border:`2px solid ${s.enabled === false ? 'var(--border)' : s.subject ? 'var(--accent)' : 'var(--border)'}`, background: s.enabled === false ? 'var(--bg)' : s.subject ? 'var(--accent-light)' : 'var(--bg)', fontSize:12, fontWeight:600, color: s.enabled === false ? 'var(--text-muted)' : s.subject ? 'var(--accent)' : 'var(--text-muted)', textAlign:'center' }}>
+                    <div>Email {i+1}{s.enabled === false ? ' (off)' : ''}</div>
+                    {i > 0 && <div style={{ fontSize:10, fontWeight:400, color:'var(--text-muted)' }}>+{s.delay_days}d</div>}
+                    {(s.send_hour_start || s.send_hour_end) && <div style={{ fontSize:9, color:'var(--info)' }}>{s.send_hour_start||'?'}–{s.send_hour_end||'?'}h</div>}
+                  </div>
+                  {i < steps.length - 1 && <span style={{ color:'var(--border-strong)', fontSize:16 }}>›</span>}
                 </div>
-                {i < steps.length - 1 && <span style={{ color:'var(--border-strong)', fontSize:16 }}>›</span>}
+              ))}
+            </div>
+
+            {steps.map((step, i) => (
+              <div key={i}>
+                <StepCard
+                  step={step} index={i} total={steps.length} campaignId={id} sequences={sequences}
+                  isActive={i === activeStepIndex} onFocusStep={setActiveStepIndex}
+                  onChange={updated => setSteps(s => s.map((x, idx) => idx === i ? updated : x))}
+                  onRemove={idx => setSteps(s => { const next = s.filter((_, j) => j !== idx); setActiveStepIndex(a => Math.min(a, next.length - 1)); return next; })}
+                  onMoveUp={idx => setSteps(s => { const a = [...s]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; return a; })}
+                  onMoveDown={idx => setSteps(s => { const a = [...s]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; return a; })}
+                />
+                {i < steps.length - 1 && <div className="step-connector" />}
               </div>
             ))}
           </div>
 
-          {steps.map((step, i) => (
-            <div key={i}>
-              <StepCard
-                step={step} index={i} total={steps.length} campaignId={id} sequences={sequences}
-                onChange={updated => setSteps(s => s.map((x, idx) => idx === i ? updated : x))}
-                onRemove={idx => setSteps(s => s.filter((_, j) => j !== idx))}
-                onMoveUp={idx => setSteps(s => { const a = [...s]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; return a; })}
-                onMoveDown={idx => setSteps(s => { const a = [...s]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; return a; })}
-              />
-              {i < steps.length - 1 && <div className="step-connector" />}
-            </div>
-          ))}
+          {/* Persistent sequence library — stays open, never collapses on you */}
+          <div style={{ flex:'0 1 280px', minWidth:240 }}>
+            <SequenceLibraryPanel
+              sequences={sequences}
+              activeStepIndex={Math.min(activeStepIndex, steps.length - 1)}
+              totalSteps={steps.length}
+              onInsert={ss => setSteps(s => s.map((x, idx) => idx === activeStepIndex ? {
+                ...x,
+                subject: ss.subject,
+                body: ss.body,
+                delay_days: ss.delay_days || x.delay_days,
+                send_hour_start: ss.send_hour_start || null,
+                send_hour_end: ss.send_hour_end || null,
+                source_sequence_step_id: ss.id,
+              } : x))}
+            />
+          </div>
         </div>
 
         {error && <div className="alert alert-error">{error}</div>}
