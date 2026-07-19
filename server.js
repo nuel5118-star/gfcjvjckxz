@@ -83,6 +83,38 @@ async function getSettings(){
   return data[0];
 }
 async function getInboxes(){const{data}=await supabase.from('inboxes').select('*').eq('active',true).order('created_at');return data||[];}
+async function getLinks(){const{data}=await supabase.from('links').select('*').order('created_at');return data||[];}
+function slugify(name){
+  return String(name||'').toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g,'_')
+    .replace(/^_+|_+$/g,'')
+    .slice(0,60)||'link';
+}
+async function uniqueSlug(name,excludeId){
+  const base=slugify(name);
+  let slug=base,n=1;
+  for(;;){
+    let q=supabase.from('links').select('id').eq('slug',slug);
+    if(excludeId)q=q.neq('id',excludeId);
+    const{data}=await q.limit(1);
+    if(!data||data.length===0)return slug;
+    n+=1;slug=`${base}_${n}`;
+  }
+}
+// Resolves {{link:slug}} or {{link:slug | "Custom anchor text"}} tokens into real
+// <a href="..."> tags — same fallback syntax already used for {{first_name | "there"}},
+// so nothing new to learn. Unknown slugs are left blank (not broken URLs) and reported
+// back to the caller via `missing` so the UI can warn before sending.
+function resolveLinks(body,links,missing){
+  if(!body)return body;
+  const map=new Map((links||[]).map(l=>[l.slug,l]));
+  return body.replace(/\{\{link:([a-z0-9_]+)\s*(?:\|\s*"?([^"}\n]*)?"?)?\}\}/gi,(match,slug,label)=>{
+    const link=map.get(slug);
+    if(!link){if(missing)missing.push(slug);return '';}
+    const text=(label&&label.trim())?label.trim():link.url;
+    return `<a href="${link.url}">${text}</a>`;
+  });
+}
 // BUG7 FIX: all daily count functions previously used server local midnight (new Date(); setHours(0,0,0,0))
 // which is wrong when the server runs in UTC but campaigns are in America/New_York etc.
 // Now we compute the start of "today" in the given timezone (defaults to settings timezone via caller).
@@ -163,7 +195,7 @@ function resolveStep(steps,fromStepNumber){
 }
 
 function injectTracking(body, params){
-  const{email,inbox,campaign_id,campaign_name,contact_id,step,send_id,subject}=params;
+  const{email,inbox,campaign_id,campaign_name,contact_id,step,send_id,subject,links}=params;
   const base=APP_URL;
 
   // If body is plain text (no HTML tags), convert newlines to <br> so
@@ -178,6 +210,12 @@ function injectTracking(body, params){
       .replace(/\n\n+/g,'<br><br>')// blank line = visible paragraph gap
       .replace(/\n/g,'<br>');// single enter = line break
   }
+
+  // Turn {{link:slug}} / {{link:slug | "label"}} tokens from the Links Library
+  // into real <a href> tags — done AFTER the plain-text/<br> step above (so line
+  // breaks aren't broken by the tags we're about to add) and BEFORE the click-tracking
+  // wrap below (so every library link automatically gets tracked, same as a hand-typed one).
+  body=resolveLinks(body,links);
 
   // Build pixel URL with all enriched params
   const pixelQ=new URLSearchParams({
@@ -504,6 +542,36 @@ app.put('/api/sequences/:id',async(req,res)=>{
   res.json(sequence);
 });
 app.delete('/api/sequences/:id',async(req,res)=>{await supabase.from('sequence_steps').delete().eq('sequence_id',req.params.id);await supabase.from('sequences').delete().eq('id',req.params.id);res.json({ok:true});});
+
+// ── LINKS LIBRARY ────────────────────────────────────────────────────────────
+// Save a link once, reuse it in any email via {{link:slug}} (shows the raw URL)
+// or {{link:slug | "Custom text"}} (shows custom anchor text) — same fallback
+// syntax as {{first_name | "there"}}. Resolved into a real <a href> at send
+// time in injectTracking(), so every library link rides through the exact same
+// click-tracking every hand-typed link already gets. See resolveLinks().
+app.get('/api/links',async(req,res)=>{const{data,error}=await supabase.from('links').select('*').order('created_at',{ascending:false});if(error)return res.status(500).json({error:error.message});res.json(data||[]);});
+app.post('/api/links',async(req,res)=>{
+  const{name,url}=req.body;
+  if(!name||!String(name).trim())return res.status(400).json({error:'Link name is required'});
+  if(!url||!/^https?:\/\//i.test(url))return res.status(400).json({error:'A valid URL starting with http:// or https:// is required'});
+  const slug=await uniqueSlug(name);
+  const{data,error}=await supabase.from('links').insert({name,url,slug,created_at:new Date().toISOString()}).select().single();
+  if(error)return res.status(500).json({error:error.message});
+  res.json(data);
+});
+app.put('/api/links/:id',async(req,res)=>{
+  const{name,url}=req.body;
+  if(!name||!String(name).trim())return res.status(400).json({error:'Link name is required'});
+  if(!url||!/^https?:\/\//i.test(url))return res.status(400).json({error:'A valid URL starting with http:// or https:// is required'});
+  // Slug is kept stable on rename so any {{link:slug}} tokens already typed into
+  // campaigns don't silently break — only regenerated if this is a brand new link.
+  const{data:existing}=await supabase.from('links').select('slug').eq('id',req.params.id).single();
+  const slug=existing?.slug||await uniqueSlug(name);
+  const{data,error}=await supabase.from('links').update({name,url}).eq('id',req.params.id).select().single();
+  if(error)return res.status(500).json({error:error.message});
+  res.json({...data,slug});
+});
+app.delete('/api/links/:id',async(req,res)=>{await supabase.from('links').delete().eq('id',req.params.id);res.json({ok:true});});
 app.post('/api/campaigns/:id/pause',async(req,res)=>{
   await supabase.from('campaigns').update({status:'paused',updated_at:new Date().toISOString()}).eq('id',req.params.id);
   // Null out next_send_at so contacts don't pile up as overdue while paused
@@ -695,8 +763,12 @@ app.post('/api/preview',async(req,res)=>{
   const{subject,body,contact}=req.body;
   const c=contact||{first_name:'John',last_name:'Smith',company:'Acme Corp',city:'Lagos',phone:'080-1234-5678',business_url:'acmecorp.com',timezone:'Africa/Lagos'};
   const missingVars=[];const varRegex=/\{\{(\w+)\s*(?:\|[^}]*)?\}\}/g;let match;
-  while((match=varRegex.exec(body||''))!==null){const key=match[1];const hasFallback=/\|\s*"?[^"}\n]+"?/.test(match[0]);if(!c[key]&&!c[key?.toLowerCase()]&&!hasFallback)missingVars.push(key);}
-  res.json({subject:applyVariables(processSpintax(subject||''),c),body:applyVariables(processSpintax(body||''),c),missingVars:[...new Set(missingVars)]});
+  while((match=varRegex.exec(body||''))!==null){const key=match[1];if(key==='link')continue;const hasFallback=/\|\s*"?[^"}\n]+"?/.test(match[0]);if(!c[key]&&!c[key?.toLowerCase()]&&!hasFallback)missingVars.push(key);}
+  const links=await getLinks();
+  const missingLinks=[];
+  const previewSubject=resolveLinks(applyVariables(processSpintax(subject||''),c),links,missingLinks);
+  const previewBody=resolveLinks(applyVariables(processSpintax(body||''),c),links,missingLinks);
+  res.json({subject:previewSubject,body:previewBody,missingVars:[...new Set(missingVars)],missingLinks:[...new Set(missingLinks)]});
 });
 
 // BLACKLIST
@@ -1138,7 +1210,7 @@ async function runForceSendTest(campaignId){
   const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
 
   const inboxes=await getInboxes();
-
+  const links=await getLinks();
   // Only eligibility filter is campaign + active + already launched (step > 0) —
   // deliberately NOT filtering on next_send_at, since "force send test" means "now".
   const contacts=await fetchAll(()=>supabase.from('contacts')
@@ -1182,7 +1254,7 @@ async function runForceSendTest(campaignId){
     const subject=applyVariables(processSpintax(step.subject),contact,customFields);
     const rawBody=applyVariables(processSpintax(step.body),contact,customFields);
     const sendId=randomUUID();
-    const trackedBody=injectTracking(rawBody,{email:contact.email,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:step.step_number,send_id:sendId,subject});
+    const trackedBody=injectTracking(rawBody,{email:contact.email,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:step.step_number,send_id:sendId,subject,links});
 
     const nextStep=resolveStep(steps,step.step_number+1);
     let advancePayload;
@@ -1250,6 +1322,7 @@ async function runScheduler(manual=false,forceCampaignId=null){
     if(!activeCampaigns.length){result.reason='campaign_not_found';await logSchedulerActivity('warn',`Force send campaign ${forceCampaignId} not found or not active`,{},runId);return result;}
 
     const inboxes=await getInboxes();
+    const links=await getLinks();
     // Hard absolute cap per inbox — the number set in the Inboxes UI. NEVER exceeded.
     const inboxCapMap=Object.fromEntries(inboxes.map(i=>[i.email,i.daily_cap||100]));
     const inboxCounts={};
@@ -1492,7 +1565,7 @@ async function runScheduler(manual=false,forceCampaignId=null){
           const subject=applyVariables(processSpintax(step.subject),contact,customFields);
           const rawBody=applyVariables(processSpintax(step.body),contact,customFields);
           const sendId=randomUUID();
-          const trackedBody=injectTracking(rawBody,{email:contact.email,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:step.step_number,send_id:sendId,subject});
+          const trackedBody=injectTracking(rawBody,{email:contact.email,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:step.step_number,send_id:sendId,subject,links});
 
           // Build advance payload — committed ONLY after webhook success
           const nextStep=resolveStep(steps,step.step_number+1);// skips disabled steps forward

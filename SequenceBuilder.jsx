@@ -11,7 +11,73 @@ const VARS = [
   { key: 'business_url', label: 'Website' },
 ];
 
-function SeqStepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown }) {
+// Same picker as the campaign builder — pick a saved link, optionally type
+// what the reader should see, insert. Produces {{link:slug}} or
+// {{link:slug | "text"}}, same fallback syntax as {{first_name | "..."}}.
+function LinkInserter({ links, onInsert }) {
+  const [open, setOpen] = useState(false);
+  const [slug, setSlug] = useState('');
+  const [label, setLabel] = useState('');
+  const selected = (links || []).find(l => l.slug === slug);
+
+  const close = () => { setOpen(false); setSlug(''); setLabel(''); };
+  const handleInsert = () => {
+    if (!selected) return;
+    onInsert(label.trim() ? `{{link:${selected.slug} | "${label.trim()}"}}` : `{{link:${selected.slug}}}`);
+    close();
+  };
+
+  if (!links || links.length === 0) {
+    return (
+      <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:10 }}>
+        🔗 No links saved yet — add one under <strong>Links</strong> in the sidebar, then come back to insert it here.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginBottom:10 }}>
+      <span className="var-pill" onClick={() => setOpen(true)}>🔗 Insert Link</span>
+      {open && (
+        <div style={{ marginTop:10, background:'var(--bg)', border:'2px solid var(--accent)', borderRadius:10, padding:16, maxWidth:400 }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+            <div style={{ fontWeight:600, fontSize:13 }}>Insert a link</div>
+            <button type="button" onClick={close} style={{ background:'none', border:'none', cursor:'pointer', fontSize:18, color:'var(--text-muted)', lineHeight:1 }}>×</button>
+          </div>
+          <div style={{ fontSize:12, color:'var(--text-secondary)', marginBottom:6 }}>Which link?</div>
+          <select className="input" style={{ marginBottom:12 }} value={slug} onChange={e => setSlug(e.target.value)} autoFocus>
+            <option value="">— Select a saved link —</option>
+            {links.map(l => <option key={l.id} value={l.slug}>{l.name}</option>)}
+          </select>
+          {selected && (
+            <>
+              <div style={{ fontSize:12, color:'var(--text-secondary)', marginBottom:6 }}>
+                What should the reader see? (leave blank to show the raw link)
+              </div>
+              <input
+                className="input"
+                style={{ marginBottom:12, fontSize:13 }}
+                placeholder='e.g. watch the quick video'
+                value={label}
+                onChange={e => setLabel(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleInsert(); if (e.key === 'Escape') close(); }}
+              />
+              <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:12, background:'var(--bg-subtle)', padding:'6px 10px', borderRadius:6 }}>
+                Reader will see: <strong style={{ color:'var(--accent)' }}>{label.trim() || selected.url}</strong>
+              </div>
+              <div style={{ display:'flex', gap:8 }}>
+                <button onClick={close} className="btn btn-secondary btn-sm">Cancel</button>
+                <button onClick={handleInsert} className="btn btn-primary btn-sm">Insert Link</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SeqStepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown, links }) {
   const insertVar = (field, v) => onChange({ ...step, [field]: (step[field] || '') + v });
   const [showPerStepTime, setShowPerStepTime] = useState(!!(step.send_hour_start || step.send_hour_end));
 
@@ -49,6 +115,8 @@ function SeqStepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveD
         <label className="label">Email Body</label>
         <textarea className="input" style={{ minHeight:160 }} placeholder={`Hi {{first_name | "there"}},\n\n...`} value={step.body} onChange={e => onChange({ ...step, body: e.target.value })} />
       </div>
+
+      <LinkInserter links={links} onInsert={v => insertVar('body', v)} />
 
       {index > 0 && (
         <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:10 }}>
@@ -94,6 +162,9 @@ export default function SequenceBuilder() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(isEdit);
+  const [links, setLinks] = useState([]);
+
+  useEffect(() => { api.getLinks().then(setLinks).catch(() => setLinks([])); }, []);
 
   useEffect(() => {
     if (!isEdit) return;
@@ -170,7 +241,7 @@ export default function SequenceBuilder() {
           {steps.map((step, i) => (
             <div key={i}>
               <SeqStepCard
-                step={step} index={i} total={steps.length}
+                step={step} index={i} total={steps.length} links={links}
                 onChange={updated => setSteps(s => s.map((x, idx) => idx === i ? updated : x))}
                 onRemove={idx => setSteps(s => s.filter((_, j) => j !== idx))}
                 onMoveUp={idx => setSteps(s => { const a = [...s]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; return a; })}

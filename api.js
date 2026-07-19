@@ -52,4 +52,8 @@ export const api = {
   createSequence: (data) => req('POST', '/sequences', data),
   updateSequence: (id, data) => req('PUT', `/sequences/${id}`, data),
   deleteSequence: (id) => req('DELETE', `/sequences/${id}`),
+  getLinks: () => req('GET', '/links'),
+  createLink: (data) => req('POST', '/links', data),
+  updateLink: (id, data) => req('PUT', `/links/${id}`, data),
+  deleteLink: (id) => req('DELETE', `/links/${id}`),
 };

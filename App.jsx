@@ -6,6 +6,7 @@ import CampaignBuilder from './CampaignBuilder.jsx';
 import CampaignDetail from './CampaignDetail.jsx';
 import SequencesPage from './SequencesPage.jsx';
 import SequenceBuilder from './SequenceBuilder.jsx';
+import LinksPage from './LinksPage.jsx';
 import ContactsPage from './ContactsPage.jsx';
 import ImportWizard from './ImportWizard.jsx';
 import AnalyticsPage from './AnalyticsPage.jsx';
@@ -56,6 +57,7 @@ function Sidebar({ open, onClose }) {
           {nav('/', I.grid, 'Dashboard', true)}
           {nav('/campaigns', I.mail, 'Campaigns')}
           {nav('/sequences', I.logs, 'Sequences')}
+          {nav('/links', I.logs, 'Links')}
           {nav('/contacts', I.users, 'Contacts')}
           {nav('/analytics', I.chart, 'Analytics')}
           {nav('/queue', I.queue, 'Queue')}
@@ -108,6 +110,7 @@ function AppInner() {
           <Route path="/sequences" element={<SequencesPage />} />
           <Route path="/sequences/new" element={<SequenceBuilder />} />
           <Route path="/sequences/:id/edit" element={<SequenceBuilder />} />
+          <Route path="/links" element={<LinksPage />} />
           <Route path="/contacts" element={<ContactsPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
           <Route path="/inboxes" element={<InboxesPage />} />
