@@ -394,7 +394,7 @@ app.post('/api/campaigns',async(req,res)=>{
   const settings=await getSettings();
   const{data:campaign,error}=await supabase.from('campaigns').insert({name,status:'draft',daily_cap:daily_cap||settings.daily_cap||500,per_inbox_cap:per_inbox_cap||settings.per_inbox_cap||100,max_new_leads_per_day:max_new_leads_per_day||0,send_hour_start:send_hour_start||settings.send_hour_start||9,send_hour_end:send_hour_end||settings.send_hour_end||17,skip_weekends:skip_weekends!==undefined?skip_weekends:true,timezone:timezone||settings.timezone||'America/New_York',start_date:start_date||null,end_date:end_date||null,stop_on_auto_reply:stop_on_auto_reply||false,random_delay_max:random_delay_max||30,created_at:new Date().toISOString(),updated_at:new Date().toISOString()}).select().single();
   if(error)return res.status(500).json({error:error.message});
-  if(steps?.length){await supabase.from('campaign_steps').insert(steps.map((s,i)=>({campaign_id:campaign.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:s.send_hour_start||null,send_hour_end:s.send_hour_end||null,enabled:s.enabled!==false,source_sequence_step_id:s.source_sequence_step_id||null})));}
+  if(steps?.length){await supabase.from('campaign_steps').insert(steps.map((s,i)=>({campaign_id:campaign.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:(s.send_hour_start??null),send_hour_end:(s.send_hour_end??null),enabled:s.enabled!==false,source_sequence_step_id:s.source_sequence_step_id||null})));}
   res.json(campaign);
 });
 
@@ -418,7 +418,7 @@ app.put('/api/campaigns/:id',async(req,res)=>{
 
   if(steps){
     await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id);
-    await supabase.from('campaign_steps').insert(steps.map((s,i)=>({campaign_id:req.params.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:s.send_hour_start||null,send_hour_end:s.send_hour_end||null,enabled:s.enabled!==false,source_sequence_step_id:s.source_sequence_step_id||null})));
+    await supabase.from('campaign_steps').insert(steps.map((s,i)=>({campaign_id:req.params.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:(s.send_hour_start??null),send_hour_end:(s.send_hour_end??null),enabled:s.enabled!==false,source_sequence_step_id:s.source_sequence_step_id||null})));
   }
 
   // FIX 3: parseInt() on both sides — without this, `9 !== "9"` is true (type coercion),
@@ -490,7 +490,7 @@ app.post('/api/sequences',async(req,res)=>{
   if(!name||!String(name).trim())return res.status(400).json({error:'Sequence name is required'});
   const{data:sequence,error}=await supabase.from('sequences').insert({name,created_at:new Date().toISOString()}).select().single();
   if(error)return res.status(500).json({error:error.message});
-  if(steps?.length){await supabase.from('sequence_steps').insert(steps.map((s,i)=>({sequence_id:sequence.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:s.send_hour_start||null,send_hour_end:s.send_hour_end||null})));}
+  if(steps?.length){await supabase.from('sequence_steps').insert(steps.map((s,i)=>({sequence_id:sequence.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:(s.send_hour_start??null),send_hour_end:(s.send_hour_end??null)})));}
   res.json(sequence);
 });
 app.put('/api/sequences/:id',async(req,res)=>{
@@ -499,7 +499,7 @@ app.put('/api/sequences/:id',async(req,res)=>{
   if(error)return res.status(500).json({error:error.message});
   if(steps){
     await supabase.from('sequence_steps').delete().eq('sequence_id',req.params.id);
-    if(steps.length)await supabase.from('sequence_steps').insert(steps.map((s,i)=>({sequence_id:req.params.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:s.send_hour_start||null,send_hour_end:s.send_hour_end||null})));
+    if(steps.length)await supabase.from('sequence_steps').insert(steps.map((s,i)=>({sequence_id:req.params.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:(s.send_hour_start??null),send_hour_end:(s.send_hour_end??null)})));
   }
   res.json(sequence);
 });
