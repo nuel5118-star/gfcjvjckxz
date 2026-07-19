@@ -46,5 +46,10 @@ export const api = {
   getAnalyticsEvents: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/analytics/events?${qs}`); },
   getEmailBody: (sendId) => req('GET', `/email/body/${sendId}`),
   getCalculatorLeads: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/calculator-leads?${qs}`); },
-  getReplies: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/replies?${qs}`); }
+  getReplies: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/replies?${qs}`); },
+  getSequences: () => req('GET', '/sequences'),
+  getSequence: (id) => req('GET', `/sequences/${id}`),
+  createSequence: (data) => req('POST', '/sequences', data),
+  updateSequence: (id, data) => req('PUT', `/sequences/${id}`, data),
+  deleteSequence: (id) => req('DELETE', `/sequences/${id}`),
 };
