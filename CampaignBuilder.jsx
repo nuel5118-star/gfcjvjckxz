@@ -97,7 +97,41 @@ function VarInserter({ onInsert }) {
   );
 }
 
-function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown, campaignId }) {
+function SequencePicker({ sequences, onPick }) {
+  const [open, setOpen] = useState(false);
+  const [seqId, setSeqId] = useState('');
+  const seq = sequences.find(s => s.id === seqId);
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <button type="button" onClick={() => setOpen(!open)} style={{ background:'none', border:'none', cursor:'pointer', fontSize:12, color:'var(--info)', padding:0 }}>
+        {open ? '▾' : '▸'} 📚 Load an email from a sequence
+      </button>
+      {open && (
+        <div style={{ display:'flex', gap:8, marginTop:8, flexWrap:'wrap', alignItems:'center' }}>
+          <select className="input" style={{ fontSize:12, maxWidth:220 }} value={seqId} onChange={e => setSeqId(e.target.value)}>
+            <option value="">— Choose a sequence —</option>
+            {sequences.map(s => <option key={s.id} value={s.id}>{s.name} ({(s.sequence_steps||[]).length} emails)</option>)}
+          </select>
+          {seq && (seq.sequence_steps||[]).map(ss => (
+            <button
+              key={ss.id}
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => { onPick(ss); setOpen(false); setSeqId(''); }}
+              title={ss.subject}
+            >
+              Email {ss.step_number}
+            </button>
+          ))}
+          {seq && (seq.sequence_steps||[]).length === 0 && <span style={{ fontSize:12, color:'var(--text-muted)' }}>This sequence has no emails yet</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown, campaignId, sequences }) {
   const [showPreview, setShowPreview] = useState(false);
   const [previewData, setPreviewData] = useState(null);
   const [testContact, setTestContact] = useState({ first_name:'John', last_name:'Smith', company:'Acme Plumbing', city:'Lagos', phone:'080-1234-5678', business_url:'acmeplumbing.com', timezone:'Africa/Lagos' });
@@ -153,18 +187,27 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
     }
   };
 
+  const enabled = step.enabled !== false;
+
   return (
-    <div className="step-card" style={{ borderColor: showPreview ? 'var(--accent)' : undefined }}>
+    <div className="step-card" style={{ borderColor: showPreview ? 'var(--accent)' : undefined, opacity: enabled ? 1 : 0.55 }}>
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
         <div className="step-number">{index + 1}</div>
         <div style={{ flex:1 }}>
-          <div style={{ fontWeight:600, fontSize:13 }}>Email {index + 1}</div>
+          <div style={{ fontWeight:600, fontSize:13, display:'flex', alignItems:'center', gap:8 }}>
+            Email {index + 1}
+            {!enabled && <span style={{ fontSize:10, background:'var(--bg-muted)', color:'var(--text-muted)', padding:'1px 7px', borderRadius:10, fontWeight:600 }}>OFF — will be skipped</span>}
+          </div>
           <div style={{ fontSize:12, color:'var(--text-muted)' }}>
-            {index === 0 ? 'First email — sent on launch day' : `Sent ${step.delay_days} business day${step.delay_days !== 1 ? 's' : ''} after email ${index}`}
+            {index === 0 ? 'First email — sent on launch day' : `Sent ${step.delay_days} business day${step.delay_days !== 1 ? 's' : ''} after the previous enabled email`}
           </div>
         </div>
-        <div style={{ display:'flex', gap:4 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+          <label style={{ display:'flex', alignItems:'center', gap:5, fontSize:11, color:'var(--text-muted)', marginRight:6, cursor:'pointer', userSelect:'none' }} title="Toggle this email off to skip it without deleting it — contacts jump straight to the next enabled email">
+            <input type="checkbox" className="checkbox" checked={enabled} onChange={e => onChange({ ...step, enabled: e.target.checked })} />
+            {enabled ? 'On' : 'Off'}
+          </label>
           <button type="button" onClick={() => onMoveUp(index)} disabled={index === 0} className="action-btn" title="Move up">▲</button>
           <button type="button" onClick={() => onMoveDown(index)} disabled={index === total - 1} className="action-btn" title="Move down">▼</button>
           <button type="button" onClick={() => { if (!showPreview) loadPreview(); setShowPreview(!showPreview); }} className="action-btn" style={{ color: showPreview ? 'var(--info)' : undefined }} title="Preview">
@@ -173,6 +216,22 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
           {total > 1 && <button type="button" onClick={() => onRemove(index)} className="action-btn danger">✕</button>}
         </div>
       </div>
+
+      {/* Pull this email's content from a saved sequence */}
+      {sequences && sequences.length > 0 && (
+        <SequencePicker
+          sequences={sequences}
+          onPick={ss => onChange({
+            ...step,
+            subject: ss.subject,
+            body: ss.body,
+            delay_days: ss.delay_days || step.delay_days,
+            send_hour_start: ss.send_hour_start || null,
+            send_hour_end: ss.send_hour_end || null,
+            source_sequence_step_id: ss.id,
+          })}
+        />
+      )}
 
       {/* Variable pills with fallback editor */}
       <VarInserter onInsert={insertVar} />
@@ -281,7 +340,8 @@ export default function CampaignBuilder() {
   const isEdit = Boolean(id);
 
   const [name, setName] = useState('');
-  const [steps, setSteps] = useState([{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null }]);
+  const [steps, setSteps] = useState([{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }]);
+  const [sequences, setSequences] = useState([]);
   const [dailyCap, setDailyCap] = useState(500);
   const [perInboxCap, setPerInboxCap] = useState(100);
   const [maxNewLeads, setMaxNewLeads] = useState(0);
@@ -298,6 +358,8 @@ export default function CampaignBuilder() {
   const [loading, setLoading] = useState(isEdit);
   // NEW: holds the reschedule result to show a confirmation banner before navigating
   const [rescheduleInfo, setRescheduleInfo] = useState(null); // { rescheduled_contacts, send_window_updated }
+
+  useEffect(() => { api.getSequences().then(setSequences).catch(() => setSequences([])); }, []);
 
   useEffect(() => {
     if (!isEdit) return;
@@ -316,8 +378,8 @@ export default function CampaignBuilder() {
       setRandomDelayMax(c.random_delay_max || 30);
       const sorted = (c.campaign_steps || []).sort((a, b) => a.step_number - b.step_number);
       setSteps(sorted.length > 0
-        ? sorted.map(s => ({ subject:s.subject, body:s.body, delay_days:s.delay_days, send_hour_start:s.send_hour_start||null, send_hour_end:s.send_hour_end||null }))
-        : [{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null }]
+        ? sorted.map(s => ({ subject:s.subject, body:s.body, delay_days:s.delay_days, send_hour_start:s.send_hour_start||null, send_hour_end:s.send_hour_end||null, enabled:s.enabled!==false, source_sequence_step_id:s.source_sequence_step_id||null }))
+        : [{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }]
       );
     }).finally(() => setLoading(false));
   }, [id]);
@@ -325,9 +387,11 @@ export default function CampaignBuilder() {
   const save = async () => {
     if (!name.trim()) { setError('Campaign name is required'); return; }
     for (let i = 0; i < steps.length; i++) {
+      if (steps[i].enabled === false) continue; // disabled steps are skipped entirely — no content required
       if (!steps[i].subject.trim()) { setError(`Email ${i+1} needs a subject line`); return; }
       if (!steps[i].body.trim()) { setError(`Email ${i+1} needs a body`); return; }
     }
+    if (steps.every(s => s.enabled === false)) { setError('At least one email needs to be turned on'); return; }
     setError('');
     setSaving(true);
     setRescheduleInfo(null);
@@ -514,7 +578,7 @@ export default function CampaignBuilder() {
               <span style={{ fontWeight:400, fontSize:12, color:'var(--text-muted)', marginLeft:8 }}>{steps.length} email{steps.length !== 1 ? 's' : ''}</span>
             </div>
             {steps.length < 10 && (
-              <button type="button" onClick={() => setSteps(s => [...s, { subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null }])} className="btn btn-secondary btn-sm">
+              <button type="button" onClick={() => setSteps(s => [...s, { subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }])} className="btn btn-secondary btn-sm">
                 + Add Email
               </button>
             )}
@@ -523,9 +587,9 @@ export default function CampaignBuilder() {
           {/* Visual timeline */}
           <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:16, flexWrap:'wrap' }}>
             {steps.map((s, i) => (
-              <div key={i} style={{ display:'flex', alignItems:'center', gap:6 }}>
-                <div style={{ padding:'6px 12px', borderRadius:8, border:`2px solid ${s.subject ? 'var(--accent)' : 'var(--border)'}`, background: s.subject ? 'var(--accent-light)' : 'var(--bg)', fontSize:12, fontWeight:600, color: s.subject ? 'var(--accent)' : 'var(--text-muted)', textAlign:'center' }}>
-                  <div>Email {i+1}</div>
+              <div key={i} style={{ display:'flex', alignItems:'center', gap:6, opacity: s.enabled === false ? 0.45 : 1 }}>
+                <div style={{ padding:'6px 12px', borderRadius:8, border:`2px solid ${s.enabled === false ? 'var(--border)' : s.subject ? 'var(--accent)' : 'var(--border)'}`, background: s.enabled === false ? 'var(--bg)' : s.subject ? 'var(--accent-light)' : 'var(--bg)', fontSize:12, fontWeight:600, color: s.enabled === false ? 'var(--text-muted)' : s.subject ? 'var(--accent)' : 'var(--text-muted)', textAlign:'center' }}>
+                  <div>Email {i+1}{s.enabled === false ? ' (off)' : ''}</div>
                   {i > 0 && <div style={{ fontSize:10, fontWeight:400, color:'var(--text-muted)' }}>+{s.delay_days}d</div>}
                   {(s.send_hour_start || s.send_hour_end) && <div style={{ fontSize:9, color:'var(--info)' }}>{s.send_hour_start||'?'}–{s.send_hour_end||'?'}h</div>}
                 </div>
@@ -537,7 +601,7 @@ export default function CampaignBuilder() {
           {steps.map((step, i) => (
             <div key={i}>
               <StepCard
-                step={step} index={i} total={steps.length} campaignId={id}
+                step={step} index={i} total={steps.length} campaignId={id} sequences={sequences}
                 onChange={updated => setSteps(s => s.map((x, idx) => idx === i ? updated : x))}
                 onRemove={idx => setSteps(s => s.filter((_, j) => j !== idx))}
                 onMoveUp={idx => setSteps(s => { const a = [...s]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; return a; })}
