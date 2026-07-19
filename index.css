@@ -157,6 +157,31 @@ body {
 }
 .card-title { font-size: 14px; font-weight: 600; color: var(--text); }
 
+/* Sequence Library panel (Campaign Builder) — on wide screens it detaches from the
+   column layout and docks to the viewport so it's visible the instant you start
+   editing a campaign, and stays put no matter how far down the page you scroll.
+   On narrower screens it falls back to sitting inline (sticky within its column,
+   wrapping below the steps on very narrow viewports) since there's no room to
+   float it without covering content. */
+.seq-library-panel {
+  position: sticky;
+  top: 16px;
+}
+@media (min-width: 1180px) {
+  .campaign-builder-page {
+    padding-right: 328px !important;
+  }
+  .seq-library-panel {
+    position: fixed;
+    top: 76px;
+    right: 24px;
+    width: 280px;
+    max-height: calc(100vh - 96px);
+    overflow-y: auto;
+    z-index: 25;
+  }
+}
+
 /* Stats */
 .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
 .stat-card {

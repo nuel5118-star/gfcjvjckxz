@@ -131,7 +131,7 @@ function SourceBadge({ step, sequences }) {
 function SequenceLibraryPanel({ sequences, activeStepIndex, totalSteps, onInsert }) {
   if (!sequences || sequences.length === 0) {
     return (
-      <div className="card" style={{ position: 'sticky', top: 16 }}>
+      <div className="card seq-library-panel">
         <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>📚 Sequence Library</div>
         <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
           No sequences yet. Build one under the Sequences tab, then come back here to pull emails into this campaign.
@@ -140,7 +140,7 @@ function SequenceLibraryPanel({ sequences, activeStepIndex, totalSteps, onInsert
     );
   }
   return (
-    <div className="card" style={{ position: 'sticky', top: 16 }}>
+    <div className="card seq-library-panel">
       <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>📚 Sequence Library</div>
       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
         Tap an email card on the left to target it (highlighted below), then hit Insert.
@@ -178,6 +178,13 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
   const [missing, setMissing] = useState([]);
   const [showPerStepTime, setShowPerStepTime] = useState(!!(step.send_hour_start || step.send_hour_end));
   const subRef = useRef(); const bodyRef = useRef();
+
+  // If a send time arrives later (e.g. pulled in from the sequence library after
+  // this card already mounted), auto-reveal the section so the user can see and
+  // tweak it right away instead of it silently applying in the background.
+  useEffect(() => {
+    if ((step.send_hour_start || step.send_hour_end) && !showPerStepTime) setShowPerStepTime(true);
+  }, [step.send_hour_start, step.send_hour_end]);
 
   const insertVar = (v) => {
     const ref = activeField === 'subject' ? subRef : bodyRef;
@@ -490,7 +497,7 @@ export default function CampaignBuilder() {
         </button>
       </div>
 
-      <div className="page fade-in" style={{ maxWidth:780 }}>
+      <div className="page fade-in campaign-builder-page" style={{ maxWidth:780 }}>
         {error && <div className="alert alert-error">{error}</div>}
 
         {/* NEW: Reschedule confirmation banner — shown after save when send window changed */}

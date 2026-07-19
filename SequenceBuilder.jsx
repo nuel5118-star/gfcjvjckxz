@@ -13,6 +13,7 @@ const VARS = [
 
 function SeqStepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown }) {
   const insertVar = (field, v) => onChange({ ...step, [field]: (step[field] || '') + v });
+  const [showPerStepTime, setShowPerStepTime] = useState(!!(step.send_hour_start || step.send_hour_end));
 
   return (
     <div className="step-card">
@@ -50,12 +51,35 @@ function SeqStepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveD
       </div>
 
       {index > 0 && (
-        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:10 }}>
           <span style={{ fontSize:13, color:'var(--text-secondary)' }}>⏱ Suggested wait</span>
           <input type="number" min="1" max="30" className="input" style={{ width:64 }} value={step.delay_days} onChange={e => onChange({ ...step, delay_days: parseInt(e.target.value) || 2 })} />
           <span style={{ fontSize:13, color:'var(--text-secondary)' }}>days (used as the default when this email is pulled into a campaign)</span>
         </div>
       )}
+
+      {/* Initial custom send time — carried into any campaign this email is pulled into,
+          and can still be tweaked per-campaign after inserting. */}
+      <div style={{ marginBottom:4 }}>
+        <button type="button" onClick={() => setShowPerStepTime(!showPerStepTime)} style={{ background:'none', border:'none', cursor:'pointer', fontSize:12, color:'var(--info)', padding:0 }}>
+          {showPerStepTime ? '▾' : '▸'} Custom send time for this email {showPerStepTime ? '(using per-step time)' : '(using campaign default)'}
+        </button>
+        {showPerStepTime && (
+          <div style={{ display:'flex', gap:12, marginTop:8, alignItems:'center' }}>
+            <div>
+              <label className="label" style={{ fontSize:11 }}>Send from (hour)</label>
+              <input type="number" min="0" max="23" className="input" style={{ width:70 }} placeholder="9" value={step.send_hour_start || ''} onChange={e => onChange({ ...step, send_hour_start: parseInt(e.target.value) || null })} />
+            </div>
+            <div>
+              <label className="label" style={{ fontSize:11 }}>Send until (hour)</label>
+              <input type="number" min="0" max="23" className="input" style={{ width:70 }} placeholder="17" value={step.send_hour_end || ''} onChange={e => onChange({ ...step, send_hour_end: parseInt(e.target.value) || null })} />
+            </div>
+            <div style={{ fontSize:11, color:'var(--text-muted)', paddingTop:18 }}>
+              24h format. This is just the default — you can still change it (or turn it off) after pulling this email into a campaign.
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
