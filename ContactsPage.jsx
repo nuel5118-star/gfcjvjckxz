@@ -58,6 +58,13 @@ export default function ContactsPage() {
               {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
             <button onClick={() => { setPage(1); load(search); }} className="btn btn-primary btn-sm">Search</button>
+            <button
+              onClick={() => api.exportAllContacts({ ...(statusFilter !== 'all' ? { status: statusFilter } : {}), ...(campaignFilter ? { campaign_id: campaignFilter } : {}) })}
+              className="btn btn-secondary btn-sm"
+              style={{ marginLeft: 'auto' }}
+            >
+              ⬇ Export CSV
+            </button>
           </div>
           <div style={{ display:'flex', gap:6, marginTop:10, flexWrap:'wrap' }}>
             {STATUS_FILTERS.map(s => (

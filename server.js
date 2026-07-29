@@ -194,6 +194,112 @@ function resolveStep(steps,fromStepNumber){
     .sort((a,b)=>a.step_number-b.step_number)[0]||null;
 }
 
+// ── BRANCHING ────────────────────────────────────────────────────────────────
+// A campaign can have more than one "track" of steps (e.g. 'main' and
+// 'engaged'). Every step and every contact carries a track column (defaults
+// to 'main' for anything created before branching existed). This filters a
+// campaign's full step list down to just the steps belonging to one track,
+// before resolveStep() picks the next one — so nothing else about the
+// scheduler needs to know branching exists.
+function stepsForTrack(steps,track){
+  const t=track||'main';
+  return (steps||[]).filter(s=>(s.track||'main')===t);
+}
+
+// Incoming steps from the builder are one flat array possibly containing more
+// than one track's steps mixed together. Each track needs its OWN 1,2,3...
+// step_number sequence (so 'main' step 1 and 'engaged' step 1 can coexist) —
+// this groups by track and numbers within each group, order-independent.
+function numberStepsByTrack(steps){
+  const counters={};
+  return (steps||[]).map(s=>{
+    const track=s.track||'main';
+    counters[track]=(counters[track]||0)+1;
+    return{
+      track,
+      step_number:counters[track],
+      subject:s.subject,
+      body:s.body,
+      delay_days:s.delay_days||2,
+      send_hour_start:(s.send_hour_start??null),
+      send_hour_end:(s.send_hour_end??null),
+      enabled:s.enabled!==false,
+      source_sequence_step_id:s.source_sequence_step_id||null,
+    };
+  });
+}
+
+// Terminal statuses a contact should never be pulled back into an active
+// sequence from, even via a branch trigger.
+const TERMINAL_STATUSES=new Set(['blacklisted','bounced','unsubscribed']);
+
+// Looks up any branch rules attached to this campaign matching the trigger
+// that just happened, and — if one matches — switches the contact onto the
+// target track starting at step 1 of that track. Safe to call on every
+// click/event; it's a no-op if there's no matching rule, the contact is
+// already on that track, or the contact is in a terminal state.
+async function checkBranchTrigger({contact_id,campaign_id,trigger_type,trigger_meta}){
+  if(!contact_id||!campaign_id||!trigger_type)return null;
+  try{
+    const{data:rules}=await supabase.from('campaign_branches')
+      .select('*')
+      .eq('campaign_id',campaign_id)
+      .eq('trigger_type',trigger_type);
+    if(!rules?.length)return null;
+
+    // For link-based triggers, only match the rule whose trigger_meta.url
+    // equals the URL that was actually clicked (or whose trigger_meta.link_id
+    // matches, if that's how the rule was saved). Rules with no meta at all
+    // match any event of that trigger_type.
+    const matched=rules.find(r=>{
+      const meta=r.trigger_meta||{};
+      if(!meta||Object.keys(meta).length===0)return true;
+      if(meta.url&&trigger_meta?.url)return meta.url===trigger_meta.url;
+      if(meta.link_id&&trigger_meta?.link_id)return meta.link_id===trigger_meta.link_id;
+      return false;
+    });
+    if(!matched)return null;
+
+    const{data:contact}=await supabase.from('contacts').select('*').eq('id',contact_id).single();
+    if(!contact)return null;
+    if(TERMINAL_STATUSES.has(contact.status))return null;
+    if((contact.track||'main')===matched.target_track)return null;// already there
+
+    const{data:campaign}=await supabase.from('campaigns').select('*, campaign_steps(*)').eq('id',campaign_id).single();
+    if(!campaign)return null;
+    const targetSteps=stepsForTrack(campaign.campaign_steps,matched.target_track);
+    const firstStep=resolveStep(targetSteps,1);
+    if(!firstStep)return null;// target track has no steps yet — nothing to switch into
+
+    const shs=firstStep.send_hour_start?parseInt(firstStep.send_hour_start):(campaign.send_hour_start||9);
+    const she=firstStep.send_hour_end?parseInt(firstStep.send_hour_end):(campaign.send_hour_end||17);
+    const tz=campaign.timezone||'America/New_York';
+    let nextSend=getScheduledTime(new Date(),0,shs,she,campaign.skip_weekends,tz);
+
+    await supabase.from('contacts').update({
+      track:matched.target_track,
+      current_step:1,
+      next_send_at:nextSend.toISOString(),
+      status:'active',
+    }).eq('id',contact_id);
+
+    await supabase.from('email_events').insert({
+      type:'track_switch',
+      recipient:contact.email,
+      campaign_id,
+      contact_id,
+      subject:`Switched to track "${matched.target_track}" (${trigger_type})`,
+      created_at:new Date().toISOString(),
+    });
+
+    await logSchedulerActivity('info',`Contact ${contact.email} switched to track "${matched.target_track}" on campaign ${campaign_id} (trigger: ${trigger_type})`,{contact_id,campaign_id,trigger_type});
+    return{switched:true,target_track:matched.target_track};
+  }catch(e){
+    console.error('[checkBranchTrigger]',e.message);
+    return null;
+  }
+}
+
 function injectTracking(body, params){
   const{email,inbox,campaign_id,campaign_name,contact_id,step,send_id,subject,links}=params;
   const base=APP_URL;
@@ -304,9 +410,39 @@ app.get('/track/calculator',async(req,res)=>{
       subject:'Calculator Link',
       created_at:new Date().toISOString()
     });
+    // Clicking the calculator link can itself be a branch trigger (e.g. move
+    // someone who merely opened the calculator onto a lighter-touch track,
+    // separate from the stronger "engaged" trigger 'calculator_submit' fired
+    // by the calculator's own webhook once they actually submit the form).
+    if(contact_id&&campaign_id){
+      checkBranchTrigger({contact_id,campaign_id,trigger_type:'calculator_click',trigger_meta:{}}).catch(()=>{});
+    }
   }catch(e){console.error('[track/calculator]',e.message);}
-  // Always redirect regardless of whether logging succeeded
-  res.redirect(CALCULATOR_URL);
+  // Forward identity onward so the calculator page — and whatever it POSTs
+  // back to your webhook — can carry contact_id/campaign_id/send_id through,
+  // even if the visitor types a completely different name/email into the
+  // form. This is the piece that makes "who actually clicked" and "what they
+  // submitted" reconcilable instead of two disconnected records.
+  const forwardQ=new URLSearchParams({
+    cid:contact_id||'',
+    campaign_id:campaign_id||'',
+    send_id:send_id||'',
+    email:email||''
+  }).toString();
+  const sep=CALCULATOR_URL.includes('?')?'&':'?';
+  res.redirect(`${CALCULATOR_URL}${sep}${forwardQ}`);
+});
+
+// Generic endpoint for external tools (the calculator's own submit webhook,
+// a video-watched webhook, anything else) to report "this contact did X" and
+// have branching react to it — same mechanism as an in-app link click, just
+// triggered from outside. trigger_meta is optional and only needed if a
+// campaign has more than one rule for the same trigger_type.
+app.post('/api/branch/trigger',async(req,res)=>{
+  const{contact_id,campaign_id,trigger_type,trigger_meta}=req.body||{};
+  if(!contact_id||!campaign_id||!trigger_type)return res.status(400).json({error:'contact_id, campaign_id, and trigger_type are required'});
+  const result=await checkBranchTrigger({contact_id,campaign_id,trigger_type,trigger_meta:trigger_meta||{}});
+  res.json({ok:true,result});
 });
 
 app.get('/track/click',async(req,res)=>{
@@ -328,6 +464,12 @@ app.get('/track/click',async(req,res)=>{
     user_agent:ua.slice(0,300),
     created_at:new Date().toISOString()
   });
+  // Any tracked link (a video, a booking page, anything saved in the Links
+  // Library) can be wired to a branch rule keyed on this exact URL — same
+  // mechanism as the calculator, no special-casing needed per link type.
+  if(contact_id&&campaign_id){
+    checkBranchTrigger({contact_id,campaign_id,trigger_type:'link_click',trigger_meta:{url}}).catch(()=>{});
+  }
   res.redirect(url);
 });
 
@@ -423,6 +565,39 @@ app.post('/api/campaigns/:id/contacts/import',async(req,res)=>{
   res.json(results);
 });
 
+// BRANCHES — per-campaign rules that switch a contact onto a different
+// track when a trigger fires (link click, calculator submit, etc).
+app.get('/api/campaigns/:id/branches',async(req,res)=>{
+  const{data,error}=await supabase.from('campaign_branches').select('*').eq('campaign_id',req.params.id).order('created_at');
+  if(error)return res.status(500).json({error:error.message});
+  res.json(data||[]);
+});
+app.post('/api/campaigns/:id/branches',async(req,res)=>{
+  const{name,trigger_type,trigger_meta,target_track}=req.body;
+  if(!trigger_type||!target_track)return res.status(400).json({error:'trigger_type and target_track are required'});
+  const{data,error}=await supabase.from('campaign_branches').insert({
+    campaign_id:req.params.id,
+    name:name||null,
+    trigger_type,
+    trigger_meta:trigger_meta||{},
+    target_track,
+    created_at:new Date().toISOString(),
+  }).select().single();
+  if(error)return res.status(500).json({error:error.message});
+  res.json(data);
+});
+app.put('/api/campaigns/:id/branches/:branchId',async(req,res)=>{
+  const{name,trigger_type,trigger_meta,target_track}=req.body;
+  const{data,error}=await supabase.from('campaign_branches').update({name,trigger_type,trigger_meta,target_track}).eq('id',req.params.branchId).eq('campaign_id',req.params.id).select().single();
+  if(error)return res.status(500).json({error:error.message});
+  res.json(data);
+});
+app.delete('/api/campaigns/:id/branches/:branchId',async(req,res)=>{
+  const{error}=await supabase.from('campaign_branches').delete().eq('id',req.params.branchId).eq('campaign_id',req.params.id);
+  if(error)return res.status(500).json({error:error.message});
+  res.json({ok:true});
+});
+
 // CAMPAIGNS CRUD
 app.get('/api/campaigns',async(req,res)=>{const{data,error}=await supabase.from('campaigns').select('*, campaign_steps(*), contacts(count)').order('created_at',{ascending:false});if(error)return res.status(500).json({error:error.message});res.json(data);});
 app.get('/api/campaigns/:id',async(req,res)=>{const{data,error}=await supabase.from('campaigns').select('*, campaign_steps(*)').eq('id',req.params.id).single();if(error)return res.status(404).json({error:'Not found'});res.json(data);});
@@ -432,7 +607,7 @@ app.post('/api/campaigns',async(req,res)=>{
   const settings=await getSettings();
   const{data:campaign,error}=await supabase.from('campaigns').insert({name,status:'draft',daily_cap:daily_cap||settings.daily_cap||500,per_inbox_cap:per_inbox_cap||settings.per_inbox_cap||100,max_new_leads_per_day:max_new_leads_per_day||0,send_hour_start:send_hour_start||settings.send_hour_start||9,send_hour_end:send_hour_end||settings.send_hour_end||17,skip_weekends:skip_weekends!==undefined?skip_weekends:true,timezone:timezone||settings.timezone||'America/New_York',start_date:start_date||null,end_date:end_date||null,stop_on_auto_reply:stop_on_auto_reply||false,random_delay_max:random_delay_max||30,created_at:new Date().toISOString(),updated_at:new Date().toISOString()}).select().single();
   if(error)return res.status(500).json({error:error.message});
-  if(steps?.length){await supabase.from('campaign_steps').insert(steps.map((s,i)=>({campaign_id:campaign.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:(s.send_hour_start??null),send_hour_end:(s.send_hour_end??null),enabled:s.enabled!==false,source_sequence_step_id:s.source_sequence_step_id||null})));}
+  if(steps?.length){await supabase.from('campaign_steps').insert(numberStepsByTrack(steps).map(s=>({...s,campaign_id:campaign.id})));}
   res.json(campaign);
 });
 
@@ -456,7 +631,7 @@ app.put('/api/campaigns/:id',async(req,res)=>{
 
   if(steps){
     await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id);
-    await supabase.from('campaign_steps').insert(steps.map((s,i)=>({campaign_id:req.params.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:(s.send_hour_start??null),send_hour_end:(s.send_hour_end??null),enabled:s.enabled!==false,source_sequence_step_id:s.source_sequence_step_id||null})));
+    await supabase.from('campaign_steps').insert(numberStepsByTrack(steps).map(s=>({...s,campaign_id:req.params.id})));
   }
 
   // FIX 3: parseInt() on both sides — without this, `9 !== "9"` is true (type coercion),
@@ -756,6 +931,25 @@ app.get('/api/campaigns/:id/contacts/export',async(req,res)=>{
   const rows=data.map(c=>headers.map(h=>`"${String(c[h]||'').replace(/"/g,'""')}"`).join(','));
   res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename="contacts.csv"`);
   res.send([headers.join(','),...rows].join('\n'));
+});
+
+// Same export, but across ALL campaigns — for the global Contacts page.
+// Honors the same optional ?status= filter, plus an optional ?campaign_id=
+// if you ever want to reuse this for a single-campaign export from that page.
+app.get('/api/contacts/export',async(req,res)=>{
+  const statusFilter=req.query.status&&req.query.status!=='all'?req.query.status:null;
+  const campaignFilter=req.query.campaign_id||null;
+  const data=await fetchAll(()=>{
+    let q=supabase.from('contacts').select('*, campaigns(name)').order('enrolled_at',{ascending:false});
+    if(statusFilter)q=q.eq('status',statusFilter);
+    if(campaignFilter)q=q.eq('campaign_id',campaignFilter);
+    return q;
+  });
+  if(!data?.length)return res.status(404).json({error:'No contacts'});
+  const headers=['email','first_name','last_name','company','city','phone','business_url','timezone','status','lead_label','current_step','track','enrolled_at','next_send_at','assigned_inbox'];
+  const rows=data.map(c=>[...headers.map(h=>`"${String(c[h]||'').replace(/"/g,'""')}"`),`"${String(c.campaigns?.name||'').replace(/"/g,'""')}"`].join(','));
+  res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename="all_contacts.csv"`);
+  res.send([[...headers,'campaign_name'].join(','),...rows].join('\n'));
 });
 
 // PREVIEW
@@ -1214,7 +1408,7 @@ async function runForceSendTest(campaignId){
   // Only eligibility filter is campaign + active + already launched (step > 0) —
   // deliberately NOT filtering on next_send_at, since "force send test" means "now".
   const contacts=await fetchAll(()=>supabase.from('contacts')
-    .select('id,email,first_name,last_name,company,custom_fields,current_step,assigned_inbox,campaign_id')
+    .select('id,email,first_name,last_name,company,custom_fields,current_step,assigned_inbox,campaign_id,track')
     .eq('status','active')
     .eq('campaign_id',campaignId)
     .gt('current_step',0));
@@ -1238,7 +1432,8 @@ async function runForceSendTest(campaignId){
     if(blacklistSet.has(email)){result.skipped++;result.skip_reasons.blacklisted=(result.skip_reasons.blacklisted||0)+1;continue;}
     if(repliedSet.has(email)){result.skipped++;result.skip_reasons.already_replied=(result.skip_reasons.already_replied||0)+1;continue;}
 
-    const step=resolveStep(steps,contact.current_step);// skips disabled steps forward
+    const contactSteps=stepsForTrack(steps,contact.track);// only this contact's track
+    const step=resolveStep(contactSteps,contact.current_step);// skips disabled steps forward
     if(!step){
       await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);
       result.skipped++;result.skip_reasons.sequence_complete=(result.skip_reasons.sequence_complete||0)+1;continue;
@@ -1256,7 +1451,7 @@ async function runForceSendTest(campaignId){
     const sendId=randomUUID();
     const trackedBody=injectTracking(rawBody,{email:contact.email,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:step.step_number,send_id:sendId,subject,links});
 
-    const nextStep=resolveStep(steps,step.step_number+1);
+    const nextStep=resolveStep(contactSteps,step.step_number+1);
     let advancePayload;
     if(nextStep){
       const shs=nextStep.send_hour_start?parseInt(nextStep.send_hour_start):(campaign.send_hour_start||9);
@@ -1394,7 +1589,7 @@ async function runScheduler(manual=false,forceCampaignId=null){
         // If follow-ups are due but their window is not open yet — we do NOT
         // fall through to new contacts. We wait. Follow-ups go first.
         const followupSteps=steps.filter(s=>s.step_number>1&&s.enabled!==false);
-        const newContactStep=steps.find(s=>s.step_number===1);
+        const newContactStep=steps.find(s=>s.step_number===1&&(s.track||'main')==='main');// new enrollments always start on 'main'
 
         // Check if any follow-up window is open right now
         let followupWindowOpen=false;
@@ -1472,7 +1667,7 @@ async function runScheduler(manual=false,forceCampaignId=null){
 
         // Fetch the right contacts
         const{data:batch,error:queryError}=await supabase.from('contacts')
-          .select('id,email,first_name,last_name,company,custom_fields,current_step,next_send_at,assigned_inbox,campaign_id')
+          .select('id,email,first_name,last_name,company,custom_fields,current_step,next_send_at,assigned_inbox,campaign_id,track')
           .eq('status','active')
           .eq('campaign_id',campaign.id)
           .gte('current_step',minStep)
@@ -1545,7 +1740,8 @@ async function runScheduler(manual=false,forceCampaignId=null){
 
           // ── BUILD EMAIL ─────────────────────────────────────────────────────
           const steps=(campaign.campaign_steps||[]).sort((a,b)=>a.step_number-b.step_number);
-          const step=resolveStep(steps,contact.current_step);// skips disabled steps forward
+          const contactSteps=stepsForTrack(steps,contact.track);// only this contact's track
+          const step=resolveStep(contactSteps,contact.current_step);// skips disabled steps forward
           if(!step){
             await supabase.from('contacts').update({status:'completed',finished_at:new Date().toISOString(),next_send_at:null}).eq('id',contact.id);
             result.skipped++;result.skip_reasons.sequence_complete=(result.skip_reasons.sequence_complete||0)+1;continue;
@@ -1568,7 +1764,7 @@ async function runScheduler(manual=false,forceCampaignId=null){
           const trackedBody=injectTracking(rawBody,{email:contact.email,inbox,campaign_id:campaign.id,campaign_name:campaign.name,contact_id:contact.id,step:step.step_number,send_id:sendId,subject,links});
 
           // Build advance payload — committed ONLY after webhook success
-          const nextStep=resolveStep(steps,step.step_number+1);// skips disabled steps forward
+          const nextStep=resolveStep(contactSteps,step.step_number+1);// skips disabled steps forward, same track
           let advancePayload=null;
           if(nextStep){
             // Use next step's own hours if set, fall back to campaign hours

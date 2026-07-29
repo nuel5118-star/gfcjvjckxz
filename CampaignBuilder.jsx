@@ -238,7 +238,7 @@ function SequenceLibraryPanel({ sequences, activeStepIndex, totalSteps, onInsert
   );
 }
 
-function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown, campaignId, sequences, links, isActive, onFocusStep }) {
+function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown, campaignId, sequences, links, isActive, onFocusStep, allTracks }) {
   const [showPreview, setShowPreview] = useState(false);
   const [previewData, setPreviewData] = useState(null);
   const [testContact, setTestContact] = useState({ first_name:'John', last_name:'Smith', company:'Acme Plumbing', city:'Lagos', phone:'080-1234-5678', business_url:'acmeplumbing.com', timezone:'Africa/Lagos' });
@@ -327,6 +327,18 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
           </div>
         </div>
         <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+          <input
+            className="input"
+            list="campaign-tracks"
+            style={{ width:110, fontSize:11, padding:'4px 6px' }}
+            value={step.track || 'main'}
+            onClick={e => e.stopPropagation()}
+            onChange={e => onChange({ ...step, track: e.target.value.trim() || 'main' })}
+            title="Which track this email belongs to. Contacts only ever see steps on their current track — use Branch Rules below to move someone onto a different track when they take an action."
+          />
+          <datalist id="campaign-tracks">
+            {(allTracks || ['main']).map(t => <option key={t} value={t} />)}
+          </datalist>
           <label style={{ display:'flex', alignItems:'center', gap:5, fontSize:11, color:'var(--text-muted)', marginRight:6, cursor:'pointer', userSelect:'none' }} title="Toggle this email off to skip it without deleting it — contacts jump straight to the next enabled email">
             <input type="checkbox" className="checkbox" checked={enabled} onChange={e => { e.stopPropagation(); onChange({ ...step, enabled: e.target.checked }); }} onClick={e => e.stopPropagation()} />
             {enabled ? 'On' : 'Off'}
@@ -448,7 +460,7 @@ export default function CampaignBuilder() {
   const isEdit = Boolean(id);
 
   const [name, setName] = useState('');
-  const [steps, setSteps] = useState([{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }]);
+  const [steps, setSteps] = useState([{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null, track:'main' }]);
   const [sequences, setSequences] = useState([]);
   const [links, setLinks] = useState([]);
   const [activeStepIndex, setActiveStepIndex] = useState(0);
@@ -489,8 +501,8 @@ export default function CampaignBuilder() {
       setRandomDelayMax(c.random_delay_max || 30);
       const sorted = (c.campaign_steps || []).sort((a, b) => a.step_number - b.step_number);
       setSteps(sorted.length > 0
-        ? sorted.map(s => ({ subject:s.subject, body:s.body, delay_days:s.delay_days, send_hour_start:s.send_hour_start||null, send_hour_end:s.send_hour_end||null, enabled:s.enabled!==false, source_sequence_step_id:s.source_sequence_step_id||null }))
-        : [{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }]
+        ? sorted.map(s => ({ subject:s.subject, body:s.body, delay_days:s.delay_days, send_hour_start:s.send_hour_start||null, send_hour_end:s.send_hour_end||null, enabled:s.enabled!==false, source_sequence_step_id:s.source_sequence_step_id||null, track:s.track||'main' }))
+        : [{ subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null, track:'main' }]
       );
     }).finally(() => setLoading(false));
   }, [id]);
@@ -690,7 +702,7 @@ export default function CampaignBuilder() {
                 <span style={{ fontWeight:400, fontSize:12, color:'var(--text-muted)', marginLeft:8 }}>{steps.length} email{steps.length !== 1 ? 's' : ''}</span>
               </div>
               {steps.length < 10 && (
-                <button type="button" onClick={() => setSteps(s => { const next = [...s, { subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null }]; setActiveStepIndex(next.length - 1); return next; })} className="btn btn-secondary btn-sm">
+                <button type="button" onClick={() => setSteps(s => { const next = [...s, { subject:'', body:'', delay_days:2, send_hour_start:null, send_hour_end:null, enabled:true, source_sequence_step_id:null, track: s[activeStepIndex]?.track || 'main' }]; setActiveStepIndex(next.length - 1); return next; })} className="btn btn-secondary btn-sm">
                   + Add Email
                 </button>
               )}
@@ -702,6 +714,7 @@ export default function CampaignBuilder() {
                 <div key={i} style={{ display:'flex', alignItems:'center', gap:6, opacity: s.enabled === false ? 0.45 : 1 }}>
                   <div style={{ padding:'6px 12px', borderRadius:8, border:`2px solid ${s.enabled === false ? 'var(--border)' : s.subject ? 'var(--accent)' : 'var(--border)'}`, background: s.enabled === false ? 'var(--bg)' : s.subject ? 'var(--accent-light)' : 'var(--bg)', fontSize:12, fontWeight:600, color: s.enabled === false ? 'var(--text-muted)' : s.subject ? 'var(--accent)' : 'var(--text-muted)', textAlign:'center' }}>
                     <div>Email {i+1}{s.enabled === false ? ' (off)' : ''}</div>
+                    {(s.track||'main') !== 'main' && <div style={{ fontSize:9, color:'var(--warning)', fontWeight:700 }}>{s.track}</div>}
                     {i > 0 && <div style={{ fontSize:10, fontWeight:400, color:'var(--text-muted)' }}>+{s.delay_days}d</div>}
                     {(s.send_hour_start || s.send_hour_end) && <div style={{ fontSize:9, color:'var(--info)' }}>{s.send_hour_start||'?'}–{s.send_hour_end||'?'}h</div>}
                   </div>
@@ -715,6 +728,7 @@ export default function CampaignBuilder() {
                 <StepCard
                   step={step} index={i} total={steps.length} campaignId={id} sequences={sequences} links={links}
                   isActive={i === activeStepIndex} onFocusStep={setActiveStepIndex}
+                  allTracks={[...new Set(steps.map(s => s.track || 'main'))]}
                   onChange={updated => setSteps(s => s.map((x, idx) => idx === i ? updated : x))}
                   onRemove={idx => setSteps(s => { const next = s.filter((_, j) => j !== idx); setActiveStepIndex(a => Math.min(a, next.length - 1)); return next; })}
                   onMoveUp={idx => setSteps(s => { const a = [...s]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; return a; })}
@@ -744,6 +758,17 @@ export default function CampaignBuilder() {
           </div>
         </div>
 
+        {/* Branch rules — only available once the campaign actually exists,
+            since a rule attaches to a real campaign_id. Create the campaign
+            first, then come back in to add branches. */}
+        {isEdit ? (
+          <BranchesPanel campaignId={id} links={links} allTracks={[...new Set(steps.map(s => s.track || 'main'))]} />
+        ) : (
+          <div className="card" style={{ marginBottom:16, fontSize:12, color:'var(--text-muted)' }}>
+            🔀 Branch Rules (move a contact onto a different track when they click a link, use the calculator, etc.) become available once you save this campaign for the first time.
+          </div>
+        )}
+
         {error && <div className="alert alert-error">{error}</div>}
 
         <div style={{ display:'flex', gap:8, justifyContent:'flex-end', paddingBottom:40 }}>
@@ -753,6 +778,140 @@ export default function CampaignBuilder() {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Trigger types a branch rule can react to. 'link_click' needs a specific
+// saved link selected (any link in the Links Library — including video
+// links, booking pages, anything); the others are reported by outside
+// systems (the calculator's own webhook, a future reply-detection hook)
+// calling POST /api/branch/trigger directly, so no extra selection is needed
+// beyond picking the trigger type itself.
+const TRIGGER_TYPES = [
+  { value: 'link_click', label: 'Clicked a specific link (pick which one below)' },
+  { value: 'calculator_click', label: 'Clicked the calculator link (opened it, hasn\'t necessarily submitted)' },
+  { value: 'calculator_submit', label: 'Submitted the calculator (via its webhook)' },
+  { value: 'reply', label: 'Replied to an email' },
+];
+
+function BranchesPanel({ campaignId, links, allTracks }) {
+  const [branches, setBranches] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [triggerType, setTriggerType] = useState('link_click');
+  const [linkSlug, setLinkSlug] = useState('');
+  const [targetTrack, setTargetTrack] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const load = () => {
+    setLoading(true);
+    api.getBranches(campaignId).then(setBranches).catch(() => setBranches([])).finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, [campaignId]);
+
+  const reset = () => { setAdding(false); setTriggerType('link_click'); setLinkSlug(''); setTargetTrack(''); setErr(''); };
+
+  const addBranch = async () => {
+    if (!targetTrack.trim()) { setErr('Give the target track a name (e.g. "engaged")'); return; }
+    if (triggerType === 'link_click' && !linkSlug) { setErr('Pick which link this rule reacts to'); return; }
+    setSaving(true); setErr('');
+    try {
+      const selectedLink = links.find(l => l.slug === linkSlug);
+      await api.createBranch(campaignId, {
+        trigger_type: triggerType,
+        trigger_meta: triggerType === 'link_click' ? { url: selectedLink?.url } : {},
+        target_track: targetTrack.trim(),
+      });
+      reset();
+      load();
+    } catch (e) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  const removeBranch = async (branchId) => {
+    if (!confirm('Remove this branch rule?')) return;
+    await api.deleteBranch(campaignId, branchId);
+    load();
+  };
+
+  return (
+    <div className="card" style={{ marginBottom:16 }}>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+        <div style={{ fontWeight:700, fontSize:15 }}>
+          🔀 Branch Rules
+          <span style={{ fontWeight:400, fontSize:12, color:'var(--text-muted)', marginLeft:8 }}>
+            switch a contact onto a different track when they take an action
+          </span>
+        </div>
+        {!adding && <button type="button" onClick={() => setAdding(true)} className="btn btn-secondary btn-sm">+ Add Rule</button>}
+      </div>
+
+      {loading ? (
+        <div style={{ fontSize:12, color:'var(--text-muted)' }}>Loading...</div>
+      ) : branches.length === 0 && !adding ? (
+        <div style={{ fontSize:12, color:'var(--text-muted)' }}>
+          No branch rules yet. Everyone stays on the "main" track until you add one — e.g. "when someone submits the calculator, switch them to track <em>engaged</em>."
+        </div>
+      ) : (
+        <div style={{ display:'flex', flexDirection:'column', gap:8, marginBottom: adding ? 12 : 0 }}>
+          {branches.map(b => (
+            <div key={b.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 10px', background:'var(--bg-subtle)', borderRadius:8, fontSize:12 }}>
+              <div style={{ flex:1 }}>
+                When <strong>{TRIGGER_TYPES.find(t => t.value === b.trigger_type)?.label || b.trigger_type}</strong>
+                {b.trigger_meta?.url && <> (<span style={{ fontFamily:'monospace' }}>{b.trigger_meta.url}</span>)</>}
+                {' '}→ switch to track <strong style={{ color:'var(--accent)' }}>{b.target_track}</strong>
+              </div>
+              <button type="button" onClick={() => removeBranch(b.id)} className="action-btn danger" title="Remove">✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {adding && (
+        <div style={{ marginTop:12, padding:14, background:'var(--bg)', border:'2px solid var(--accent)', borderRadius:10 }}>
+          {err && <div className="alert alert-error" style={{ marginBottom:10 }}>{err}</div>}
+          <div className="form-group">
+            <label className="label">When this happens</label>
+            <select className="input" value={triggerType} onChange={e => setTriggerType(e.target.value)}>
+              {TRIGGER_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </select>
+          </div>
+          {triggerType === 'link_click' && (
+            <div className="form-group">
+              <label className="label">Which link</label>
+              {links.length === 0 ? (
+                <div style={{ fontSize:12, color:'var(--text-muted)' }}>No saved links yet — add one under Links in the sidebar first.</div>
+              ) : (
+                <select className="input" value={linkSlug} onChange={e => setLinkSlug(e.target.value)}>
+                  <option value="">— Select a saved link —</option>
+                  {links.map(l => <option key={l.id} value={l.slug}>{l.name}</option>)}
+                </select>
+              )}
+            </div>
+          )}
+          <div className="form-group">
+            <label className="label">Switch them to this track</label>
+            <input
+              className="input"
+              list="branch-tracks"
+              placeholder='e.g. "engaged"'
+              value={targetTrack}
+              onChange={e => setTargetTrack(e.target.value)}
+            />
+            <datalist id="branch-tracks">
+              {(allTracks || ['main']).map(t => <option key={t} value={t} />)}
+            </datalist>
+            <div className="form-hint" style={{ marginTop:4 }}>
+              This needs to match a track name you've assigned to at least one email above (see the small track box on each email card), or the switch will have nothing to send.
+            </div>
+          </div>
+          <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+            <button type="button" onClick={reset} className="btn btn-secondary btn-sm">Cancel</button>
+            <button type="button" onClick={addBranch} disabled={saving} className="btn btn-primary btn-sm">{saving ? 'Saving...' : 'Add Rule'}</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

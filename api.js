@@ -31,6 +31,15 @@ export const api = {
     a.click();
     document.body.removeChild(a);
   },
+  exportAllContacts: (params={}) => {
+    const qs = new URLSearchParams(params).toString();
+    const a = document.createElement('a');
+    a.href = BASE+'/contacts/export'+(qs?'?'+qs:'');
+    a.download = 'all_contacts.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  },
   preview: (subject, body, contact) => req('POST', '/preview', { subject, body, contact }),
   getBlacklist: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/blacklist?${qs}`); },
   addToBlacklist: (email, reason) => req('POST', '/blacklist', { email, reason }),
@@ -56,4 +65,8 @@ export const api = {
   createLink: (data) => req('POST', '/links', data),
   updateLink: (id, data) => req('PUT', `/links/${id}`, data),
   deleteLink: (id) => req('DELETE', `/links/${id}`),
+  getBranches: (campaignId) => req('GET', `/campaigns/${campaignId}/branches`),
+  createBranch: (campaignId, data) => req('POST', `/campaigns/${campaignId}/branches`, data),
+  updateBranch: (campaignId, branchId, data) => req('PUT', `/campaigns/${campaignId}/branches/${branchId}`, data),
+  deleteBranch: (campaignId, branchId) => req('DELETE', `/campaigns/${campaignId}/branches/${branchId}`),
 };

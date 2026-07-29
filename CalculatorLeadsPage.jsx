@@ -14,7 +14,7 @@ function formatDate(ts) {
 }
 
 export default function CalculatorLeadsPage() {
-  const [activeTab, setActiveTab] = useState('missed_revenue');
+  const [activeTab, setActiveTab] = useState('ad_calculator');
   const [leads, setLeads] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -51,8 +51,8 @@ export default function CalculatorLeadsPage() {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden', marginRight: 8 }}>
               {[
-                ['missed_revenue', '📞 Missed Revenue Calculator'],
                 ['ad_calculator', '📢 Ad Calculator'],
+                ['missed_revenue', '📞 Missed Revenue Calculator'],
               ].map(([val, label]) => (
                 <button
                   key={val}
