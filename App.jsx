@@ -6,6 +6,8 @@ import CampaignBuilder from './CampaignBuilder.jsx';
 import CampaignDetail from './CampaignDetail.jsx';
 import SequencesPage from './SequencesPage.jsx';
 import SequenceBuilder from './SequenceBuilder.jsx';
+import IntentTracksPage from './IntentTracksPage.jsx';
+import IntentTrackBuilder from './IntentTrackBuilder.jsx';
 import LinksPage from './LinksPage.jsx';
 import ContactsPage from './ContactsPage.jsx';
 import ImportWizard from './ImportWizard.jsx';
@@ -57,17 +59,18 @@ function Sidebar({ open, onClose }) {
           {nav('/', I.grid, 'Dashboard', true)}
           {nav('/campaigns', I.mail, 'Campaigns')}
           {nav('/sequences', I.logs, 'Sequences')}
+          {nav('/intent-tracks', I.logs, 'Intent Tracks')}
           {nav('/links', I.logs, 'Links')}
           {nav('/contacts', I.users, 'Contacts')}
           {nav('/analytics', I.chart, 'Analytics')}
           {nav('/queue', I.queue, 'Queue')}
+          <div className="nav-label" style={{ marginTop: 16 }}>Leads</div>
+          {nav('/calculator-leads', I.calc, 'Calculator Leads')}
+          {nav('/replies', I.reply, 'Replies')}
           <div className="nav-label" style={{ marginTop: 16 }}>Config</div>
           {nav('/inboxes', I.inbox, 'Inboxes')}
           {nav('/blacklist', I.ban, 'Blacklist')}
           {nav('/settings', I.cog, 'Settings')}
-          <div className="nav-label" style={{ marginTop: 16 }}>Leads</div>
-          {nav('/calculator-leads', I.calc, 'Calculator Leads')}
-          {nav('/replies', I.reply, 'Replies')}
           <div className="nav-label" style={{ marginTop: 16 }}>Debug</div>
           {nav('/logs', I.logs, 'Error Logs')}
         </nav>
@@ -110,6 +113,9 @@ function AppInner() {
           <Route path="/sequences" element={<SequencesPage />} />
           <Route path="/sequences/new" element={<SequenceBuilder />} />
           <Route path="/sequences/:id/edit" element={<SequenceBuilder />} />
+          <Route path="/intent-tracks" element={<IntentTracksPage />} />
+          <Route path="/intent-tracks/new" element={<IntentTrackBuilder />} />
+          <Route path="/intent-tracks/:id/edit" element={<IntentTrackBuilder />} />
           <Route path="/links" element={<LinksPage />} />
           <Route path="/contacts" element={<ContactsPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />

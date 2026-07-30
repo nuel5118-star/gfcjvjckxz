@@ -565,37 +565,14 @@ app.post('/api/campaigns/:id/contacts/import',async(req,res)=>{
   res.json(results);
 });
 
-// BRANCHES — per-campaign rules that switch a contact onto a different
-// track when a trigger fires (link click, calculator submit, etc).
+// BRANCHES — raw campaign_branches rows (used internally by checkBranchTrigger;
+// kept here read-only for debugging). Creating/removing branches now happens
+// exclusively through Intent Track attach/detach above, since a branch rule
+// without copied-in steps has nothing to send.
 app.get('/api/campaigns/:id/branches',async(req,res)=>{
   const{data,error}=await supabase.from('campaign_branches').select('*').eq('campaign_id',req.params.id).order('created_at');
   if(error)return res.status(500).json({error:error.message});
   res.json(data||[]);
-});
-app.post('/api/campaigns/:id/branches',async(req,res)=>{
-  const{name,trigger_type,trigger_meta,target_track}=req.body;
-  if(!trigger_type||!target_track)return res.status(400).json({error:'trigger_type and target_track are required'});
-  const{data,error}=await supabase.from('campaign_branches').insert({
-    campaign_id:req.params.id,
-    name:name||null,
-    trigger_type,
-    trigger_meta:trigger_meta||{},
-    target_track,
-    created_at:new Date().toISOString(),
-  }).select().single();
-  if(error)return res.status(500).json({error:error.message});
-  res.json(data);
-});
-app.put('/api/campaigns/:id/branches/:branchId',async(req,res)=>{
-  const{name,trigger_type,trigger_meta,target_track}=req.body;
-  const{data,error}=await supabase.from('campaign_branches').update({name,trigger_type,trigger_meta,target_track}).eq('id',req.params.branchId).eq('campaign_id',req.params.id).select().single();
-  if(error)return res.status(500).json({error:error.message});
-  res.json(data);
-});
-app.delete('/api/campaigns/:id/branches/:branchId',async(req,res)=>{
-  const{error}=await supabase.from('campaign_branches').delete().eq('id',req.params.branchId).eq('campaign_id',req.params.id);
-  if(error)return res.status(500).json({error:error.message});
-  res.json({ok:true});
 });
 
 // CAMPAIGNS CRUD
@@ -630,7 +607,10 @@ app.put('/api/campaigns/:id',async(req,res)=>{
   if(error)return res.status(500).json({error:error.message});
 
   if(steps){
-    await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id);
+    // Only ever touches the 'main' track — steps on other tracks come from
+    // attached Intent Tracks (see /attached-tracks below) and are managed
+    // entirely through attach/detach, not through this save.
+    await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id).eq('track','main');
     await supabase.from('campaign_steps').insert(numberStepsByTrack(steps).map(s=>({...s,campaign_id:req.params.id})));
   }
 
@@ -717,6 +697,92 @@ app.put('/api/sequences/:id',async(req,res)=>{
   res.json(sequence);
 });
 app.delete('/api/sequences/:id',async(req,res)=>{await supabase.from('sequence_steps').delete().eq('sequence_id',req.params.id);await supabase.from('sequences').delete().eq('id',req.params.id);res.json({ok:true});});
+
+// ═══════════════════════════════════════════════════════════════
+// INTENT TRACKS — a reusable library, same idea as Sequences above, but
+// for the alternate email paths contacts get switched onto when they show
+// intent. Build once here; attach to any campaign with a specific trigger.
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/intent-tracks',async(req,res)=>{const{data,error}=await supabase.from('intent_tracks').select('*, intent_track_steps(*)').order('created_at',{ascending:false});if(error)return res.status(500).json({error:error.message});const sorted=(data||[]).map(t=>({...t,intent_track_steps:(t.intent_track_steps||[]).sort((a,b)=>a.step_number-b.step_number)}));res.json(sorted);});
+app.get('/api/intent-tracks/:id',async(req,res)=>{const{data,error}=await supabase.from('intent_tracks').select('*, intent_track_steps(*)').eq('id',req.params.id).single();if(error)return res.status(404).json({error:'Not found'});data.intent_track_steps=(data.intent_track_steps||[]).sort((a,b)=>a.step_number-b.step_number);res.json(data);});
+app.post('/api/intent-tracks',async(req,res)=>{
+  const{name,description,steps}=req.body;
+  if(!name||!String(name).trim())return res.status(400).json({error:'Track name is required'});
+  const{data:track,error}=await supabase.from('intent_tracks').insert({name,description:description||null,created_at:new Date().toISOString()}).select().single();
+  if(error)return res.status(500).json({error:error.message});
+  if(steps?.length){await supabase.from('intent_track_steps').insert(steps.map((s,i)=>({intent_track_id:track.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:(s.send_hour_start??null),send_hour_end:(s.send_hour_end??null)})));}
+  res.json(track);
+});
+app.put('/api/intent-tracks/:id',async(req,res)=>{
+  const{name,description,steps}=req.body;
+  const{data:track,error}=await supabase.from('intent_tracks').update({name,description:description||null}).eq('id',req.params.id).select().single();
+  if(error)return res.status(500).json({error:error.message});
+  if(steps){
+    await supabase.from('intent_track_steps').delete().eq('intent_track_id',req.params.id);
+    if(steps.length)await supabase.from('intent_track_steps').insert(steps.map((s,i)=>({intent_track_id:req.params.id,step_number:i+1,subject:s.subject,body:s.body,delay_days:s.delay_days||2,send_hour_start:(s.send_hour_start??null),send_hour_end:(s.send_hour_end??null)})));
+  }
+  res.json(track);
+});
+app.delete('/api/intent-tracks/:id',async(req,res)=>{await supabase.from('intent_track_steps').delete().eq('intent_track_id',req.params.id);await supabase.from('intent_tracks').delete().eq('id',req.params.id);res.json({ok:true});});
+
+// ── Attaching an Intent Track to a campaign ─────────────────────────────────
+// This is the ONLY place trigger specifics (which link, etc.) get chosen —
+// the track itself is just reusable content. Attaching copies the track's
+// steps into this campaign's campaign_steps under a dedicated track id, and
+// creates the campaign_branches rule that actually fires the switch.
+app.get('/api/campaigns/:id/attached-tracks',async(req,res)=>{
+  const{data,error}=await supabase.from('campaign_branches').select('*, intent_tracks(name,description)').eq('campaign_id',req.params.id).not('intent_track_id','is',null).order('created_at');
+  if(error)return res.status(500).json({error:error.message});
+  res.json(data||[]);
+});
+app.post('/api/campaigns/:id/attached-tracks',async(req,res)=>{
+  const{intent_track_id,trigger_type,trigger_meta}=req.body;
+  if(!intent_track_id||!trigger_type)return res.status(400).json({error:'intent_track_id and trigger_type are required'});
+  const{data:track,error:trackErr}=await supabase.from('intent_tracks').select('*, intent_track_steps(*)').eq('id',intent_track_id).single();
+  if(trackErr||!track)return res.status(404).json({error:'Intent track not found'});
+  if(!track.intent_track_steps?.length)return res.status(400).json({error:'This track has no emails yet — add some on the Intent Tracks page first'});
+
+  // Each attachment gets its own track id on campaign_steps/contacts, so the
+  // same library track can be attached to multiple campaigns (or attached
+  // twice to the same campaign with different triggers) without colliding.
+  const trackSlot=randomUUID();
+  await supabase.from('campaign_steps').insert(
+    track.intent_track_steps
+      .sort((a,b)=>a.step_number-b.step_number)
+      .map((s,i)=>({
+        campaign_id:req.params.id,track:trackSlot,step_number:i+1,
+        subject:s.subject,body:s.body,delay_days:s.delay_days||2,
+        send_hour_start:s.send_hour_start??null,send_hour_end:s.send_hour_end??null,
+        enabled:s.enabled!==false,source_intent_track_id:intent_track_id,
+      }))
+  );
+
+  const{data:branch,error}=await supabase.from('campaign_branches').insert({
+    campaign_id:req.params.id,
+    intent_track_id,
+    name:track.name,
+    trigger_type,
+    trigger_meta:trigger_meta||{},
+    target_track:trackSlot,
+    created_at:new Date().toISOString(),
+  }).select().single();
+  if(error)return res.status(500).json({error:error.message});
+  res.json(branch);
+});
+app.delete('/api/campaigns/:id/attached-tracks/:branchId',async(req,res)=>{
+  const{data:branch}=await supabase.from('campaign_branches').select('*').eq('id',req.params.branchId).eq('campaign_id',req.params.id).single();
+  if(!branch)return res.status(404).json({error:'Not found'});
+
+  const{data:activeOnTrack}=await supabase.from('contacts').select('id').eq('campaign_id',req.params.id).eq('track',branch.target_track).eq('status','active').limit(1);
+  if(activeOnTrack?.length){
+    return res.status(409).json({error:'Contacts are currently active on this track — move or pause them before detaching, or their sequence will just stop mid-way.'});
+  }
+
+  await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id).eq('track',branch.target_track);
+  await supabase.from('campaign_branches').delete().eq('id',req.params.branchId);
+  res.json({ok:true});
+});
+
 
 // ── LINKS LIBRARY ────────────────────────────────────────────────────────────
 // Save a link once, reuse it in any email via {{link:slug}} (shows the raw URL)
