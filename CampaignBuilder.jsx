@@ -326,19 +326,28 @@ function StepCard({ step, index, total, onChange, onRemove, onMoveUp, onMoveDown
             {index === 0 ? 'First email — sent on launch day' : `Sent ${step.delay_days} business day${step.delay_days !== 1 ? 's' : ''} after the previous enabled email`}
           </div>
         </div>
-        <div style={{ display:'flex', alignItems:'center', gap:4 }}>
-          <input
-            className="input"
-            list="campaign-tracks"
-            style={{ width:110, fontSize:11, padding:'4px 6px' }}
-            value={step.track || 'main'}
-            onClick={e => e.stopPropagation()}
-            onChange={e => onChange({ ...step, track: e.target.value.trim() || 'main' })}
-            title="Which track this email belongs to. Contacts only ever see steps on their current track — use Branch Rules below to move someone onto a different track when they take an action."
-          />
-          <datalist id="campaign-tracks">
-            {(allTracks || ['main']).map(t => <option key={t} value={t} />)}
-          </datalist>
+        <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:4, background:'var(--bg-subtle)', border:'1px solid var(--border)', borderRadius:8, padding:'3px 4px 3px 8px' }}>
+            <span style={{ fontSize:10, color:'var(--text-muted)', fontWeight:600, textTransform:'uppercase', letterSpacing:0.3 }}>Track:</span>
+            <select
+              className="input"
+              style={{ width:'auto', minWidth:80, fontSize:12, padding:'3px 6px', fontWeight:600, color: (step.track||'main')!=='main' ? 'var(--warning)' : 'var(--text)', border:'none', background:'transparent' }}
+              value={step.track || 'main'}
+              onClick={e => e.stopPropagation()}
+              onChange={e => {
+                if (e.target.value === '__new__') {
+                  const name = prompt('Name this new track (e.g. "engaged"):');
+                  if (name && name.trim()) onChange({ ...step, track: name.trim() });
+                  return;
+                }
+                onChange({ ...step, track: e.target.value });
+              }}
+              title="Which track this email belongs to. Contacts only ever see steps on their current track — use Branch Rules below to move someone onto a different track when they take an action."
+            >
+              {(allTracks || ['main']).map(t => <option key={t} value={t}>{t}</option>)}
+              <option value="__new__">+ New track...</option>
+            </select>
+          </div>
           <label style={{ display:'flex', alignItems:'center', gap:5, fontSize:11, color:'var(--text-muted)', marginRight:6, cursor:'pointer', userSelect:'none' }} title="Toggle this email off to skip it without deleting it — contacts jump straight to the next enabled email">
             <input type="checkbox" className="checkbox" checked={enabled} onChange={e => { e.stopPropagation(); onChange({ ...step, enabled: e.target.checked }); }} onClick={e => e.stopPropagation()} />
             {enabled ? 'On' : 'Off'}
@@ -707,6 +716,9 @@ export default function CampaignBuilder() {
                 </button>
               )}
             </div>
+            <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:-6, marginBottom:12 }}>
+              Every email defaults to the <strong>main</strong> track. To build a separate sequence for people who take an action (see Branch Rules below), open an email's <strong>Track</strong> dropdown and choose "+ New track..."
+            </div>
 
             {/* Visual timeline */}
             <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:16, flexWrap:'wrap' }}>
@@ -892,18 +904,24 @@ function BranchesPanel({ campaignId, links, allTracks }) {
           )}
           <div className="form-group">
             <label className="label">Switch them to this track</label>
-            <input
+            <select
               className="input"
-              list="branch-tracks"
-              placeholder='e.g. "engaged"'
               value={targetTrack}
-              onChange={e => setTargetTrack(e.target.value)}
-            />
-            <datalist id="branch-tracks">
-              {(allTracks || ['main']).map(t => <option key={t} value={t} />)}
-            </datalist>
+              onChange={e => {
+                if (e.target.value === '__new__') {
+                  const name = prompt('Name this new track (e.g. "engaged"):');
+                  if (name && name.trim()) setTargetTrack(name.trim());
+                  return;
+                }
+                setTargetTrack(e.target.value);
+              }}
+            >
+              <option value="">— Select a track —</option>
+              {(allTracks || ['main']).filter(t => t !== 'main').map(t => <option key={t} value={t}>{t}</option>)}
+              <option value="__new__">+ New track...</option>
+            </select>
             <div className="form-hint" style={{ marginTop:4 }}>
-              This needs to match a track name you've assigned to at least one email above (see the small track box on each email card), or the switch will have nothing to send.
+              After picking/naming a track here, go assign at least one email to it — open any email above, use its <strong>Track</strong> dropdown, and select (or create) the same track name.
             </div>
           </div>
           <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
