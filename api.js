@@ -45,6 +45,9 @@ export const api = {
   addToBlacklist: (email, reason) => req('POST', '/blacklist', { email, reason }),
   importBlacklist: (csv) => req('POST', '/blacklist/import', { csv }),
   removeFromBlacklist: (id) => req('DELETE', `/blacklist/${id}`),
+  getUnsubscribes: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/unsubscribes?${qs}`); },
+  addUnsubscribe: (email, reason) => req('POST', '/unsubscribes', { email, reason }),
+  removeUnsubscribe: (id) => req('DELETE', `/unsubscribes/${id}`),
   getInboxes: () => req('GET', '/inboxes'),
   createInbox: (data) => req('POST', '/inboxes', data),
   updateInbox: (id, data) => req('PUT', `/inboxes/${id}`, data),
@@ -72,5 +75,7 @@ export const api = {
   deleteIntentTrack: (id) => req('DELETE', `/intent-tracks/${id}`),
   getAttachedTracks: (campaignId) => req('GET', `/campaigns/${campaignId}/attached-tracks`),
   attachTrack: (campaignId, data) => req('POST', `/campaigns/${campaignId}/attached-tracks`, data),
-  detachTrack: (campaignId, branchId) => req('DELETE', `/campaigns/${campaignId}/attached-tracks/${branchId}`),
+  detachTrack: (campaignId, attachmentId) => req('DELETE', `/campaigns/${campaignId}/attached-tracks/${attachmentId}`),
+  addTrackRule: (campaignId, attachmentId, data) => req('POST', `/campaigns/${campaignId}/attached-tracks/${attachmentId}/rules`, data),
+  removeTrackRule: (campaignId, ruleId) => req('DELETE', `/campaigns/${campaignId}/rules/${ruleId}`),
 };

@@ -160,6 +160,21 @@ async function addToBlacklist(email,reason){
   await supabase.from('contacts').update({status:'blacklisted',next_send_at:null}).eq('email',normalizeEmail(email));
 }
 
+// Deliberately a SEPARATE table/status from blacklist, not just a different
+// reason on the same list — bounce/spam-complaint/manual blacklist entries
+// should never be reversed, but someone who unsubscribed could reasonably
+// be re-permissioned later (e.g. they opt back in some other way). Keeping
+// them apart means that distinction is enforced structurally, not just by
+// convention.
+async function isUnsubscribed(email){const{data}=await supabase.from('unsubscribes').select('id').eq('email',normalizeEmail(email)).limit(1);return data&&data.length>0;}
+async function addToUnsubscribe(email,reason){
+  await supabase.from('unsubscribes').upsert({email:normalizeEmail(email),reason,created_at:new Date().toISOString()},{onConflict:'email'});
+  // Stops every contact row with this email, across every campaign — same
+  // global guarantee blacklist already gives, just a different status value
+  // so it's reportable/distinguishable from an actual blacklist entry.
+  await supabase.from('contacts').update({status:'unsubscribed',next_send_at:null}).eq('email',normalizeEmail(email));
+}
+
 function getScheduledTime(baseDate,delayDays,hourStart,hourEnd,skipWeekends,timezone='UTC'){
   let d=new Date(baseDate);let added=0;
   while(added<delayDays){d=addDays(d,1);if(!skipWeekends||!isWeekend(d))added++;}
@@ -353,11 +368,18 @@ function injectTracking(body, params){
     return `<a${before}href="${base}/track/click?${clickQ}"${after}>`;
   });
 
-  // Append pixel — before </body> if it exists, otherwise at the very end
+  // Unsubscribe footer — appended to EVERY email, unconditionally. Not
+  // something a campaign can opt out of; this isn't wrapped by the click-
+  // tracking regex above (it runs after that step) since this link should
+  // go straight to /unsubscribe, not through /track/click.
+  const unsubUrl=`${base}/unsubscribe?email=${encodeURIComponent(email)}`;
+  const footer=`<p style="font-size:11px;color:#9a9a9a;margin-top:28px;padding-top:12px;border-top:1px solid #e5e5e5;">If you'd rather not receive these emails, <a href="${unsubUrl}" style="color:#9a9a9a;">unsubscribe here</a>.</p>`;
+
+  // Append pixel + footer — before </body> if it exists, otherwise at the very end
   if(tracked.toLowerCase().includes('</body>')){
-    tracked=tracked.replace(/<\/body>/i,`${pixel}</body>`);
+    tracked=tracked.replace(/<\/body>/i,`${footer}${pixel}</body>`);
   }else{
-    tracked=tracked+pixel;
+    tracked=tracked+footer+pixel;
   }
   return tracked;
 }
@@ -546,7 +568,7 @@ app.post('/api/csv/parse',async(req,res)=>{
 app.post('/api/campaigns/:id/contacts/import',async(req,res)=>{
   const{csv,mapping}=req.body;if(!csv)return res.status(400).json({error:'No CSV'});
   let records;try{records=parse(csv,{columns:true,skip_empty_lines:true,trim:true,bom:true});}catch(e){return res.status(400).json({error:'Invalid CSV: '+e.message});}
-  const results={imported:0,skipped:0,invalid:0,duplicates:0,blacklisted:0,cross_campaign_dupes:0,errors:[]};
+  const results={imported:0,skipped:0,invalid:0,duplicates:0,blacklisted:0,unsubscribed:0,cross_campaign_dupes:0,errors:[]};
   const campaignId=req.params.id;const seen=new Set();
   for(const record of records){
     const contact={};const customFields={};
@@ -557,6 +579,7 @@ app.post('/api/campaigns/:id/contacts/import',async(req,res)=>{
     if(seen.has(email)){results.duplicates++;continue;}
     seen.add(email);
     if(await isBlacklisted(email)){results.blacklisted++;results.skipped++;continue;}
+    if(await isUnsubscribed(email)){results.unsubscribed++;results.skipped++;continue;}
     const{data:existing}=await supabase.from('contacts').select('id,campaign_id').eq('email',email).limit(1);
     if(existing&&existing.length>0){if(existing[0].campaign_id===campaignId){results.duplicates++;continue;}else{results.cross_campaign_dupes++;}}
     const{error}=await supabase.from('contacts').upsert({campaign_id:campaignId,email,first_name:formatName(contact.first_name||''),last_name:formatName(contact.last_name||''),company:contact.company||'',city:contact.city||'',phone:contact.phone||'',business_url:contact.business_url||'',timezone:contact.timezone||'',custom_fields:customFields,status:'active',current_step:0,enrolled_at:new Date().toISOString()},{onConflict:'campaign_id,email'});
@@ -726,15 +749,19 @@ app.put('/api/intent-tracks/:id',async(req,res)=>{
 app.delete('/api/intent-tracks/:id',async(req,res)=>{await supabase.from('intent_track_steps').delete().eq('intent_track_id',req.params.id);await supabase.from('intent_tracks').delete().eq('id',req.params.id);res.json({ok:true});});
 
 // ── Attaching an Intent Track to a campaign ─────────────────────────────────
-// This is the ONLY place trigger specifics (which link, etc.) get chosen —
-// the track itself is just reusable content. Attaching copies the track's
-// steps into this campaign's campaign_steps under a dedicated track id, and
-// creates the campaign_branches rule that actually fires the switch.
+// An attachment = the track's steps copied in, living under one target_track
+// slot. A track can have MULTIPLE rules pointing at that same slot — e.g.
+// "clicked the calculator link" OR "replied" can both route different
+// people onto the same attached sequence. Rules are managed independently
+// of the attachment itself: adding/removing a rule never touches the steps.
 app.get('/api/campaigns/:id/attached-tracks',async(req,res)=>{
-  const{data,error}=await supabase.from('campaign_branches').select('*, intent_tracks(name,description)').eq('campaign_id',req.params.id).not('intent_track_id','is',null).order('created_at');
+  const{data:attachments,error}=await supabase.from('track_attachments').select('*, intent_tracks(name,description)').eq('campaign_id',req.params.id).order('created_at');
   if(error)return res.status(500).json({error:error.message});
-  res.json(data||[]);
+  if(!attachments?.length)return res.json([]);
+  const{data:rules}=await supabase.from('campaign_branches').select('*').eq('campaign_id',req.params.id).not('attachment_id','is',null);
+  res.json(attachments.map(a=>({...a,rules:(rules||[]).filter(r=>r.attachment_id===a.id)})));
 });
+
 app.post('/api/campaigns/:id/attached-tracks',async(req,res)=>{
   const{intent_track_id,trigger_type,trigger_meta}=req.body;
   if(!intent_track_id||!trigger_type)return res.status(400).json({error:'intent_track_id and trigger_type are required'});
@@ -742,9 +769,9 @@ app.post('/api/campaigns/:id/attached-tracks',async(req,res)=>{
   if(trackErr||!track)return res.status(404).json({error:'Intent track not found'});
   if(!track.intent_track_steps?.length)return res.status(400).json({error:'This track has no emails yet — add some on the Intent Tracks page first'});
 
-  // Each attachment gets its own track id on campaign_steps/contacts, so the
-  // same library track can be attached to multiple campaigns (or attached
-  // twice to the same campaign with different triggers) without colliding.
+  // Each attachment gets its own track slot, so the same library track can
+  // be attached more than once (e.g. to different campaigns, or twice to
+  // the same campaign as genuinely separate sequences) without colliding.
   const trackSlot=randomUUID();
   await supabase.from('campaign_steps').insert(
     track.intent_track_steps
@@ -757,31 +784,62 @@ app.post('/api/campaigns/:id/attached-tracks',async(req,res)=>{
       }))
   );
 
-  const{data:branch,error}=await supabase.from('campaign_branches').insert({
-    campaign_id:req.params.id,
-    intent_track_id,
-    name:track.name,
-    trigger_type,
-    trigger_meta:trigger_meta||{},
-    target_track:trackSlot,
-    created_at:new Date().toISOString(),
+  const{data:attachment,error:attachErr}=await supabase.from('track_attachments').insert({
+    campaign_id:req.params.id,intent_track_id,target_track:trackSlot,created_at:new Date().toISOString(),
+  }).select().single();
+  if(attachErr)return res.status(500).json({error:attachErr.message});
+
+  const{data:rule,error:ruleErr}=await supabase.from('campaign_branches').insert({
+    campaign_id:req.params.id,attachment_id:attachment.id,intent_track_id,name:track.name,
+    trigger_type,trigger_meta:trigger_meta||{},target_track:trackSlot,created_at:new Date().toISOString(),
+  }).select().single();
+  if(ruleErr)return res.status(500).json({error:ruleErr.message});
+  res.json({...attachment,rules:[rule]});
+});
+
+// Add another rule to an already-attached track — no steps are touched,
+// this just gives one more condition that routes onto the same sequence.
+app.post('/api/campaigns/:id/attached-tracks/:attachmentId/rules',async(req,res)=>{
+  const{trigger_type,trigger_meta}=req.body;
+  if(!trigger_type)return res.status(400).json({error:'trigger_type is required'});
+  const{data:attachment}=await supabase.from('track_attachments').select('*').eq('id',req.params.attachmentId).eq('campaign_id',req.params.id).single();
+  if(!attachment)return res.status(404).json({error:'Attachment not found'});
+  const{data:rule,error}=await supabase.from('campaign_branches').insert({
+    campaign_id:req.params.id,attachment_id:attachment.id,intent_track_id:attachment.intent_track_id,
+    trigger_type,trigger_meta:trigger_meta||{},target_track:attachment.target_track,created_at:new Date().toISOString(),
   }).select().single();
   if(error)return res.status(500).json({error:error.message});
-  res.json(branch);
+  res.json(rule);
 });
-app.delete('/api/campaigns/:id/attached-tracks/:branchId',async(req,res)=>{
-  const{data:branch}=await supabase.from('campaign_branches').select('*').eq('id',req.params.branchId).eq('campaign_id',req.params.id).single();
-  if(!branch)return res.status(404).json({error:'Not found'});
 
-  const{data:activeOnTrack}=await supabase.from('contacts').select('id').eq('campaign_id',req.params.id).eq('track',branch.target_track).eq('status','active').limit(1);
+// Remove ONE rule — the attachment and its steps stay put, this just takes
+// away one of the conditions that could route someone onto it. If it was
+// the last rule, the track simply becomes unreachable until a rule is added
+// back (its emails aren't deleted — use the full detach below for that).
+app.delete('/api/campaigns/:id/rules/:ruleId',async(req,res)=>{
+  const{error}=await supabase.from('campaign_branches').delete().eq('id',req.params.ruleId).eq('campaign_id',req.params.id);
+  if(error)return res.status(500).json({error:error.message});
+  res.json({ok:true});
+});
+
+// Full detach — removes every rule AND the copied-in steps. Blocked if
+// anyone is currently active on this track (finish moving/pausing them
+// first, or their sequence just stops mid-way with nothing to send next).
+app.delete('/api/campaigns/:id/attached-tracks/:attachmentId',async(req,res)=>{
+  const{data:attachment}=await supabase.from('track_attachments').select('*').eq('id',req.params.attachmentId).eq('campaign_id',req.params.id).single();
+  if(!attachment)return res.status(404).json({error:'Not found'});
+
+  const{data:activeOnTrack}=await supabase.from('contacts').select('id').eq('campaign_id',req.params.id).eq('track',attachment.target_track).eq('status','active').limit(1);
   if(activeOnTrack?.length){
     return res.status(409).json({error:'Contacts are currently active on this track — move or pause them before detaching, or their sequence will just stop mid-way.'});
   }
 
-  await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id).eq('track',branch.target_track);
-  await supabase.from('campaign_branches').delete().eq('id',req.params.branchId);
+  await supabase.from('campaign_steps').delete().eq('campaign_id',req.params.id).eq('track',attachment.target_track);
+  await supabase.from('campaign_branches').delete().eq('attachment_id',attachment.id);
+  await supabase.from('track_attachments').delete().eq('id',attachment.id);
   res.json({ok:true});
 });
+
 
 
 // ── LINKS LIBRARY ────────────────────────────────────────────────────────────
@@ -1036,6 +1094,36 @@ app.get('/api/blacklist',async(req,res)=>{const page=parseInt(req.query.page||'1
 app.post('/api/blacklist',async(req,res)=>{const{email,reason}=req.body;if(!email||!isValidEmail(email))return res.status(400).json({error:'Invalid email'});await addToBlacklist(email,reason||'manual');res.json({ok:true});});
 app.post('/api/blacklist/import',async(req,res)=>{const{csv}=req.body;let records;try{records=parse(csv,{columns:true,skip_empty_lines:true,trim:true});}catch(e){return res.status(400).json({error:'Invalid CSV'});}let added=0;for(const r of records){const email=normalizeEmail(r.email||r.Email||'');if(isValidEmail(email)){await addToBlacklist(email,'bulk_import');added++;}}res.json({added});});
 app.delete('/api/blacklist/:id',async(req,res)=>{await supabase.from('blacklist').delete().eq('id',req.params.id);res.json({ok:true});});
+
+// UNSUBSCRIBES — separate list from Blacklist on purpose (see comment above
+// addToUnsubscribe). Same admin CRUD shape as Blacklist above.
+app.get('/api/unsubscribes',async(req,res)=>{const page=parseInt(req.query.page||'1'),pageSize=parseInt(req.query.pageSize||'50'),offset=(page-1)*pageSize;const{data,count}=await supabase.from('unsubscribes').select('*',{count:'exact'}).order('created_at',{ascending:false}).range(offset,offset+pageSize-1);res.json({items:data||[],total:count||0,page,pageSize});});
+app.post('/api/unsubscribes',async(req,res)=>{const{email,reason}=req.body;if(!email||!isValidEmail(email))return res.status(400).json({error:'Invalid email'});await addToUnsubscribe(email,reason||'manual');res.json({ok:true});});
+app.delete('/api/unsubscribes/:id',async(req,res)=>{await supabase.from('unsubscribes').delete().eq('id',req.params.id);res.json({ok:true});});
+
+// The actual link every email's footer points to. Public, no auth (a human
+// clicks this from their inbox) — GET because it's a link, not a form post.
+// Keyed on the plain email address per our discussion: worst case of someone
+// unsubscribing an address that isn't theirs is just "that address stops
+// getting emails," which isn't a real security problem, and it keeps the
+// link simple and consistent with how blacklist/unsubscribes are already
+// keyed everywhere else in this app.
+app.get('/unsubscribe',async(req,res)=>{
+  const email=normalizeEmail(req.query.email||'');
+  if(!email||!isValidEmail(email)){
+    return res.status(400).send('<html><body style="font-family:sans-serif;text-align:center;padding:60px 20px;"><h2>Invalid request</h2><p>This unsubscribe link is missing or malformed.</p></body></html>');
+  }
+  try{
+    await addToUnsubscribe(email,'link_click');
+  }catch(e){
+    console.error('[unsubscribe]',e.message);
+  }
+  res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:60px 20px;color:#333;">
+    <h2>You've been unsubscribed</h2>
+    <p>${email} won't receive any further emails from us.</p>
+  </body></html>`);
+});
+
 
 // INBOXES
 app.get('/api/inboxes',async(req,res)=>{const{data}=await supabase.from('inboxes').select('*').order('created_at');res.json(data||[]);});
