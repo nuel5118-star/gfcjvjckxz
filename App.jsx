@@ -12,6 +12,7 @@ import LinksPage from './LinksPage.jsx';
 import ContactsPage from './ContactsPage.jsx';
 import ImportWizard from './ImportWizard.jsx';
 import AnalyticsPage from './AnalyticsPage.jsx';
+import AnalyticsLogsPage from './AnalyticsLogsPage.jsx';
 import InboxesPage from './InboxesPage.jsx';
 import BlacklistPage from './BlacklistPage.jsx';
 import UnsubscribesPage from './UnsubscribesPage.jsx';
@@ -73,6 +74,8 @@ function Sidebar({ open, onClose }) {
           {nav('/blacklist', I.ban, 'Blacklist')}
           {nav('/unsubscribed', I.ban, 'Unsubscribed')}
           {nav('/settings', I.cog, 'Settings')}
+          <div className="nav-label" style={{ marginTop: 16 }}>Logs</div>
+          {nav('/logs/analytics', I.logs, 'Analytics Logs')}
           <div className="nav-label" style={{ marginTop: 16 }}>Debug</div>
           {nav('/logs', I.logs, 'Error Logs')}
         </nav>
@@ -121,6 +124,7 @@ function AppInner() {
           <Route path="/links" element={<LinksPage />} />
           <Route path="/contacts" element={<ContactsPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
+          <Route path="/logs/analytics" element={<AnalyticsLogsPage />} />
           <Route path="/inboxes" element={<InboxesPage />} />
           <Route path="/blacklist" element={<BlacklistPage />} />
           <Route path="/unsubscribed" element={<UnsubscribesPage />} />

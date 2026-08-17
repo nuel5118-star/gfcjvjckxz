@@ -1163,14 +1163,18 @@ app.get('/api/analytics',async(req,res)=>{
   const dailyMap={};
   ev.forEach(e=>{
     const day=e.created_at?.split('T')[0];if(!day)return;
-    if(!dailyMap[day])dailyMap[day]={date:day,sends:0,opens:0,bot_opens:0,clicks:0,replies:0,bounces:0,failed:0};
+    if(!dailyMap[day])dailyMap[day]={date:day,sends:0,delivered:0,opens:0,bot_opens:0,clicks:0,replies:0,bounces:0,failed:0};
     if(e.type==='send')dailyMap[day].sends++;
+    else if(e.type==='delivered')dailyMap[day].delivered++;
     else if(e.type==='open'){if(e.is_bot)dailyMap[day].bot_opens++;else dailyMap[day].opens++;}
     else if(e.type==='click')dailyMap[day].clicks++;
     else if(e.type==='reply'||e.type==='replied')dailyMap[day].replies++;
     else if(e.type==='bounce')dailyMap[day].bounces++;
     else if(e.type==='send_failed')dailyMap[day].failed++;
   });
+  // Per-day delivered fallback (sends - failed) for days with no explicit 'delivered' events —
+  // mirrors the same realDelivered logic used for the top-line totals.
+  Object.values(dailyMap).forEach(d=>{ if(!d.delivered) d.delivered=Math.max(0,d.sends-d.failed); });
 
   // Inbox breakdown — include bounces
   const inboxMap={};
@@ -1185,20 +1189,25 @@ app.get('/api/analytics',async(req,res)=>{
 
   // Campaign breakdown — which campaigns actually sent emails (for UI dropdown verification)
   const campaignMap={};
-  ev.filter(e=>e.type==='send'&&e.campaign_id).forEach(e=>{
-    if(!campaignMap[e.campaign_id])campaignMap[e.campaign_id]={campaign_id:e.campaign_id,name:e.campaign||e.campaign_id,sends:0,opens:0,replies:0};
-    campaignMap[e.campaign_id].sends++;
-  });
-  ev.filter(e=>e.type==='open'&&e.campaign_id).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].opens++;});
+  const ensureCampaign=id=>{ if(!campaignMap[id])campaignMap[id]={campaign_id:id,name:id,sends:0,delivered:0,opens:0,clicks:0,replies:0,failed:0}; return campaignMap[id]; };
+  ev.filter(e=>e.type==='send'&&e.campaign_id).forEach(e=>{ const c=ensureCampaign(e.campaign_id); c.name=e.campaign||e.campaign_id; c.sends++; });
+  ev.filter(e=>e.type==='delivered'&&e.campaign_id).forEach(e=>{ if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].delivered++; });
+  ev.filter(e=>e.type==='open'&&e.campaign_id&&!e.is_bot).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].opens++;});
+  ev.filter(e=>e.type==='click'&&e.campaign_id).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].clicks++;});
   ev.filter(e=>(e.type==='reply'||e.type==='replied')&&e.campaign_id).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].replies++;});
+  ev.filter(e=>e.type==='send_failed'&&e.campaign_id).forEach(e=>{if(campaignMap[e.campaign_id])campaignMap[e.campaign_id].failed++;});
+  // Per-campaign delivered fallback, same pattern as the top-line total.
+  Object.values(campaignMap).forEach(c=>{ if(!c.delivered) c.delivered=Math.max(0,c.sends-c.failed); });
 
   res.json({
     totals:{sends,opens,bot_opens:botOpens,all_opens:allOpens,clicks,replies,bounces,failed,delivered:realDelivered,total:ev.length},
+    // Rates are based on delivered, not attempted sends — attempted (webhook-fired) sends that never
+    // actually reach an inbox shouldn't dilute the denominator and deflate the rates.
     rates:{
-      open_rate:sends>0?((opens/sends)*100).toFixed(1):'0.0',
-      click_rate:sends>0?((clicks/sends)*100).toFixed(1):'0.0',
-      reply_rate:sends>0?((replies/sends)*100).toFixed(1):'0.0',
-      bounce_rate:sends>0?((bounces/sends)*100).toFixed(1):'0.0'
+      open_rate:realDelivered>0?((opens/realDelivered)*100).toFixed(1):'0.0',
+      click_rate:realDelivered>0?((clicks/realDelivered)*100).toFixed(1):'0.0',
+      reply_rate:realDelivered>0?((replies/realDelivered)*100).toFixed(1):'0.0',
+      bounce_rate:realDelivered>0?((bounces/realDelivered)*100).toFixed(1):'0.0'
     },
     daily:Object.values(dailyMap).sort((a,b)=>a.date.localeCompare(b.date)).slice(-30),
     inboxes:Object.values(inboxMap),
