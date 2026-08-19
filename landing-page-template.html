@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{business_name}} — A quick word</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0A0A0A;
+    --panel: #151515;
+    --panel-2: #1C1C1C;
+    --accent: #E8E8E8;
+    --accent-bright: #FFFFFF;
+    --cream: #F2F2F2;
+    --cream-dim: #8C8C8C;
+    --border: #2A2A2A;
+    --texture: #FFFFFF;
+    --texture-opacity: 0.14;
+    --num-font: 'Space Grotesk', sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--cream);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background-image: repeating-linear-gradient(135deg, var(--texture) 0px, var(--texture) 1px, transparent 1px, transparent 26px);
+    opacity: var(--texture-opacity);
+  }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 72px 24px 100px;
+  }
+
+  .eyebrow {
+    font-family: var(--num-font);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before { content: ''; width: 24px; height: 1px; background: var(--accent); }
+
+  h1 {
+    font-family: 'Fraunces', serif;
+    font-weight: 600;
+    font-size: clamp(30px, 5vw, 44px);
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    margin-bottom: 16px;
+  }
+  h1 .biz-name { color: var(--accent-bright); font-style: italic; font-weight: 500; }
+
+  .subhead {
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--cream-dim);
+    max-width: 480px;
+    margin-bottom: 40px;
+  }
+
+  /* ── Video block with synced screenshot overlay ─────────────── */
+  .video-block {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16/9;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+    margin-bottom: 48px;
+  }
+  .video-block video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .screenshot-overlay {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: top center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.4s ease;
+  }
+  .screenshot-overlay.visible { opacity: 1; }
+
+  .recap {
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--cream-dim);
+    border-left: 2px solid var(--accent);
+    padding-left: 18px;
+    margin-bottom: 64px;
+  }
+  .recap strong { color: var(--cream); font-weight: 600; }
+
+  .ledger-section { margin-bottom: 64px; text-align: center; }
+  .ledger-title { font-family: 'Fraunces', serif; font-size: 24px; font-weight: 600; margin-bottom: 6px; }
+  .ledger-sub { font-size: 14px; color: var(--cream-dim); margin-bottom: 32px; }
+
+  .calc-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 40px 36px;
+    max-width: 460px;
+    margin: 0 auto;
+    text-align: left;
+  }
+
+  .flow-stat {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 22px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .flow-stat:first-of-type { padding-top: 0; }
+  .flow-stat-label { font-size: 15px; color: var(--cream-dim); line-height: 1.5; max-width: 300px; }
+
+  .stepper { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  .stepper button {
+    width: 30px; height: 30px; background: none; border: none;
+    color: var(--cream-dim); font-size: 17px; cursor: pointer;
+    font-family: var(--num-font); border-radius: 999px;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+  .stepper button:hover { color: var(--accent); background: var(--panel-2); }
+  .stepper .dollar-sign { color: var(--accent); font-family: var(--num-font); font-size: 26px; font-weight: 600; margin-right: 2px; }
+  .stepper input {
+    width: 84px; text-align: right; background: none; border: none;
+    color: var(--accent); font-family: var(--num-font); font-size: 26px;
+    font-weight: 600; letter-spacing: -0.01em; -moz-appearance: textfield;
+  }
+  .stepper input::-webkit-outer-spin-button, .stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .stepper input:focus { outline: none; }
+
+  .flow-result { padding-top: 40px; text-align: left; }
+  .flow-result-label { font-size: 13px; color: var(--cream-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+  .flow-result-value {
+    font-family: var(--num-font); font-size: clamp(36px, 7vw, 56px); font-weight: 600;
+    color: var(--accent-bright); letter-spacing: -0.02em; line-height: 1; margin-bottom: 14px;
+  }
+  .flow-result-caption { font-size: 13px; color: var(--cream-dim); line-height: 1.6; max-width: 420px; }
+  .flow-result-caption span { color: var(--cream); font-weight: 500; }
+
+  @media (max-width: 480px) {
+    .flow-stat { flex-direction: column; align-items: flex-start; gap: 14px; }
+    .stepper input { text-align: left; }
+  }
+
+  .cta-block { text-align: center; }
+  .cta-btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: var(--accent-bright); color: var(--bg);
+    font-family: 'Inter', sans-serif; font-weight: 600; font-size: 15px;
+    padding: 16px 32px; border-radius: 999px; border: none; cursor: pointer;
+    transition: background 0.2s ease, transform 0.2s ease; text-decoration: none;
+  }
+  .cta-btn:hover { transform: translateY(-1px); }
+  .cta-sub { margin-top: 16px; font-size: 13px; color: var(--cream-dim); }
+  .cta-sub a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent); }
+
+  @media (max-width: 520px) { .wrap { padding: 60px 18px 80px; } }
+</style>
+</head>
+<body>
+
+  <div class="wrap">
+
+    <div class="eyebrow">Prepared for {{business_name}}</div>
+    <h1>A quick word for <span class="biz-name">{{business_name}}</span></h1>
+    <p class="subhead">Instead of another email you'll never read — a two minute video on what we built for a company just like yours.</p>
+
+    <div class="video-block">
+      <video id="mainVideo" controls playsinline>
+        <source src="{{video_url}}" type="video/mp4">
+      </video>
+      <div id="screenshotOverlay" class="screenshot-overlay" style="background-image:url('{{screenshot_url}}');"></div>
+    </div>
+
+    <p class="recap"><strong>Most companies in your line of work</strong> send out quotes that just go quiet. No response. Those aren't dead leads. We follow up on them and turn them into real booked jobs.</p>
+
+    <div class="ledger-section">
+      <div class="ledger-title">Check your own number</div>
+      <div class="ledger-sub">Enter what's actually sitting in your job board right now.</div>
+
+      <div class="calc-box">
+        <div class="flow-stat">
+          <div class="flow-stat-label">Unanswered quotes sitting in your pipeline</div>
+          <div class="stepper">
+            <button onclick="step('quotes', -1)">−</button>
+            <input type="number" id="quotes" value="20" oninput="calc()">
+            <button onclick="step('quotes', 1)">+</button>
+          </div>
+        </div>
+        <div class="flow-stat">
+          <div class="flow-stat-label">Average job value</div>
+          <div class="stepper">
+            <button onclick="step('jobvalue', -50)">−</button>
+            <span class="dollar-sign">$</span>
+            <input type="number" id="jobvalue" value="500" step="50" oninput="calc()">
+            <button onclick="step('jobvalue', 50)">+</button>
+          </div>
+        </div>
+        <div class="flow-result">
+          <div class="flow-result-label">Estimated recoverable</div>
+          <div class="flow-result-value" id="recoverableValue">$1,000 – $2,000</div>
+          <div class="flow-result-caption">Out of <span id="totalValue">$10,000</span> in total unanswered quotes — money tied to leads you've already paid to generate, not new ad spend.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="cta-block">
+      <a href="{{booking_url}}" class="cta-btn">Book a 15-minute call →</a>
+      <div class="cta-sub">Or just <a href="mailto:{{assigned_inbox}}?subject=Re: {{original_subject}}">reply to the email</a> and we'll set up a time.</div>
+    </div>
+
+  </div>
+
+<script>
+  const CONTACT_ID = "{{contact_id}}";
+  const CAMPAIGN_ID = "{{campaign_id}}";
+
+  // ── Screenshot overlay, synced to video playback time ──────────
+  // Windows are injected server-side from the settings/defaults —
+  // update DEFAULT_SCREENSHOT_WINDOWS in server.js once the real
+  // blank-spot timestamps are known from the finished videos.
+  const SCREENSHOT_WINDOWS = JSON.parse('{{screenshot_windows}}');
+
+  const video = document.getElementById('mainVideo');
+  const overlay = document.getElementById('screenshotOverlay');
+
+  video.addEventListener('timeupdate', () => {
+    const t = video.currentTime;
+    const inWindow = SCREENSHOT_WINDOWS.some(w => t >= w.start && t <= w.end);
+    overlay.classList.toggle('visible', inWindow);
+  });
+
+  // ── Calculator ───────────────────────────────────────────────
+  function step(id, dir) {
+    const el = document.getElementById(id);
+    let val = parseInt(el.value || 0) + dir;
+    if (val < 0) val = 0;
+    el.value = val;
+    calc();
+  }
+  function formatCurrency(n) { return '$' + Math.round(n).toLocaleString('en-US'); }
+
+  function calc() {
+    const quotes = parseFloat(document.getElementById('quotes').value) || 0;
+    const jobValue = parseFloat(document.getElementById('jobvalue').value) || 0;
+    const total = quotes * jobValue;
+    const low = total * 0.10;
+    const high = total * 0.20;
+    document.getElementById('totalValue').textContent = formatCurrency(total);
+    document.getElementById('recoverableValue').textContent = formatCurrency(low) + ' – ' + formatCurrency(high);
+
+    clearTimeout(window._calcSubmitTimer);
+    window._calcSubmitTimer = setTimeout(() => submitCalc(quotes, jobValue, total, low, high), 800);
+  }
+
+  async function submitCalc(quotes, jobValue, total, low, high) {
+    if (!CONTACT_ID) return;
+    try {
+      await fetch('/api/calc-submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contact_id: CONTACT_ID, campaign_id: CAMPAIGN_ID,
+          quotes, job_value: jobValue, total, recoverable_low: low, recoverable_high: high
+        })
+      });
+    } catch (e) { console.error('Could not save calculator submission', e); }
+  }
+
+  calc();
+</script>
+
+</body>
+</html>

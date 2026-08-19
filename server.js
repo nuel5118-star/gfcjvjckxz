@@ -10,6 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
+import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -455,6 +456,127 @@ app.get('/track/calculator',async(req,res)=>{
   res.redirect(`${CALCULATOR_URL}${sep}${forwardQ}`);
 });
 
+// ── LANDING PAGE SLUG SYSTEM ─────────────────────────────────────
+// Short, random, URL-safe slug so the personalized landing page URL
+// stays clean (yourdomain.com/w/ax7g2k) with no query params visible.
+function generateSlug(){
+  return Math.random().toString(36).slice(2,8);
+}
+async function assignUniqueSlug(contactId){
+  let slug, exists = true, attempts = 0;
+  while(exists && attempts < 5){
+    slug = generateSlug();
+    const { data } = await supabase.from('contacts').select('id').eq('page_slug', slug).limit(1);
+    exists = data && data.length > 0;
+    attempts++;
+  }
+  await supabase.from('contacts').update({ page_slug: slug }).eq('id', contactId);
+  return slug;
+}
+
+function getVideoUrlForNiche(settings, niche){
+  const map = {
+    lawn_care: settings.video_url_lawn_care,
+    irrigation: settings.video_url_irrigation,
+    tree_removal: settings.video_url_tree_removal,
+  };
+  return map[niche] || map.tree_removal || '';
+}
+
+// Placeholder screenshot-overlay windows — UPDATE once you know the
+// real blank timestamps in each finished video (seconds).
+const DEFAULT_SCREENSHOT_WINDOWS = [
+  { start: 0, end: 4 },
+  { start: 38, end: 45 },
+];
+
+// ── LANDING PAGE ROUTE ───────────────────────────────────────────
+// Clean URL: yourdomain.com/w/ax7g2k — renders server-side with this
+// contact's data already filled in, no query params ever shown.
+app.get('/w/:slug', async (req, res) => {
+  const { slug } = req.params;
+  const { data: contact, error } = await supabase
+    .from('contacts')
+    .select('id,email,first_name,company,niche,screenshot_url,assigned_inbox,campaign_id,custom_fields')
+    .eq('page_slug', slug)
+    .single();
+
+  if (error || !contact) {
+    return res.status(404).send('This link is no longer active.');
+  }
+
+  const settings = await getSettings();
+  const videoUrl = getVideoUrlForNiche(settings, contact.niche);
+  const businessName = contact.company || contact.first_name || 'there';
+  const screenshotUrl = contact.screenshot_url || '';
+  const bookingUrl = settings.booking_url || '#';
+  const assignedInbox = contact.assigned_inbox || settings.reply_to_email || '';
+  const originalSubject = (contact.custom_fields && contact.custom_fields.last_subject) || 'our conversation';
+
+  try {
+    if (contact.id && contact.campaign_id) {
+      checkBranchTrigger({
+        contact_id: contact.id,
+        campaign_id: contact.campaign_id,
+        trigger_type: 'landing_page_view',
+        trigger_meta: {}
+      }).catch(() => {});
+    }
+  } catch (e) { console.error('[landing page view]', e.message); }
+
+  const template = fs.readFileSync(path.join(__dirname, 'landing-page-template.html'), 'utf8');
+
+  const html = template
+    .replace(/\{\{business_name\}\}/g, businessName)
+    .replace(/\{\{video_url\}\}/g, videoUrl)
+    .replace(/\{\{screenshot_url\}\}/g, screenshotUrl)
+    .replace(/\{\{booking_url\}\}/g, bookingUrl)
+    .replace(/\{\{assigned_inbox\}\}/g, assignedInbox)
+    .replace(/\{\{original_subject\}\}/g, encodeURIComponent(originalSubject))
+    .replace(/\{\{contact_id\}\}/g, contact.id)
+    .replace(/\{\{campaign_id\}\}/g, contact.campaign_id || '')
+    .replace(/\{\{screenshot_windows\}\}/g, JSON.stringify(DEFAULT_SCREENSHOT_WINDOWS));
+
+  res.set('Content-Type', 'text/html');
+  res.send(html);
+});
+
+// ── CALCULATOR SUBMIT (landing page recovery calculator) ─────────
+// Saves to its own table AND writes onto the contact's custom_fields
+// so {{calc_total}} / {{calc_recoverable}} work as merge tags.
+app.post('/api/calc-submit', async (req, res) => {
+  const { contact_id, campaign_id, quotes, job_value, total, recoverable_low, recoverable_high } = req.body || {};
+  if (!contact_id) return res.status(400).json({ error: 'contact_id required' });
+
+  try {
+    await supabase.from('recovery_calc_submissions').insert({
+      contact_id, campaign_id, quotes, job_value: job_value,
+      total, recoverable_low, recoverable_high
+    });
+
+    const { data: contact } = await supabase.from('contacts').select('custom_fields').eq('id', contact_id).single();
+    const existingFields = (contact && contact.custom_fields) || {};
+    const fmt = (n) => '$' + Math.round(n).toLocaleString('en-US');
+
+    await supabase.from('contacts').update({
+      custom_fields: {
+        ...existingFields,
+        calc_total: fmt(total),
+        calc_recoverable: `${fmt(recoverable_low)} – ${fmt(recoverable_high)}`,
+      }
+    }).eq('id', contact_id);
+
+    if (campaign_id) {
+      checkBranchTrigger({ contact_id, campaign_id, trigger_type: 'calculator_submit', trigger_meta: {} }).catch(() => {});
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[calc-submit]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Generic endpoint for external tools (the calculator's own submit webhook,
 // a video-watched webhook, anything else) to report "this contact did X" and
 // have branching react to it — same mechanism as an in-app link click, just
@@ -582,8 +704,8 @@ app.post('/api/campaigns/:id/contacts/import',async(req,res)=>{
     if(await isUnsubscribed(email)){results.unsubscribed++;results.skipped++;continue;}
     const{data:existing}=await supabase.from('contacts').select('id,campaign_id').eq('email',email).limit(1);
     if(existing&&existing.length>0){if(existing[0].campaign_id===campaignId){results.duplicates++;continue;}else{results.cross_campaign_dupes++;}}
-    const{error}=await supabase.from('contacts').upsert({campaign_id:campaignId,email,first_name:formatName(contact.first_name||''),last_name:formatName(contact.last_name||''),company:contact.company||'',city:contact.city||'',phone:contact.phone||'',business_url:contact.business_url||'',timezone:contact.timezone||'',custom_fields:customFields,status:'active',current_step:0,enrolled_at:new Date().toISOString()},{onConflict:'campaign_id,email'});
-    if(error){results.errors.push(`${email}: ${error.message}`);}else{results.imported++;}
+    const{data:inserted,error}=await supabase.from('contacts').upsert({campaign_id:campaignId,email,first_name:formatName(contact.first_name||''),last_name:formatName(contact.last_name||''),company:contact.company||'',city:contact.city||'',phone:contact.phone||'',business_url:contact.business_url||'',timezone:contact.timezone||'',niche:contact.niche||'',screenshot_url:contact.screenshot_url||'',custom_fields:customFields,status:'active',current_step:0,enrolled_at:new Date().toISOString()},{onConflict:'campaign_id,email'}).select().single();
+    if(error){results.errors.push(`${email}: ${error.message}`);}else{results.imported++;if(inserted&&inserted.id)await assignUniqueSlug(inserted.id);}
   }
   res.json(results);
 });

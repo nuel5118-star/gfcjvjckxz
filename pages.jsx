@@ -422,7 +422,7 @@ export function BlacklistPage() {
 
 // ── SETTINGS ──────────────────────────────────────────────────────────────────
 export function SettingsPage() {
-  const [s, setS] = useState({ webhook_url:'', daily_cap:500, per_inbox_cap:100, send_hour_start:9, send_hour_end:17, skip_weekends:true, timezone:'America/New_York' });
+  const [s, setS] = useState({ webhook_url:'', daily_cap:500, per_inbox_cap:100, send_hour_start:9, send_hour_end:17, skip_weekends:true, timezone:'America/New_York', video_url_lawn_care:'', video_url_irrigation:'', video_url_tree_removal:'', booking_url:'' });
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -461,6 +461,28 @@ export function SettingsPage() {
       <div className="page fade-in" style={{ maxWidth:660 }}>
         {error && <div className="alert alert-error">{error}</div>}
         {saved && <div className="alert alert-success">Settings saved successfully</div>}
+        <div className="card" style={{ marginBottom:16 }}>
+          <div style={{ fontWeight:600, marginBottom:4 }}>🎥 Landing Page Videos</div>
+          <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:16 }}>
+            One video per niche — shared across every lead in that niche. Paste the Supabase Storage public URL for each once uploaded.
+          </div>
+          <div className="form-group" style={{ marginBottom:12 }}>
+            <label className="label">Lawn Care video URL</label>
+            <input className="input" placeholder="https://...supabase.co/storage/v1/object/public/videos/lawn_care.mp4" value={s.video_url_lawn_care||''} onChange={e => set('video_url_lawn_care', e.target.value)} />
+          </div>
+          <div className="form-group" style={{ marginBottom:12 }}>
+            <label className="label">Irrigation video URL</label>
+            <input className="input" placeholder="https://...supabase.co/storage/v1/object/public/videos/irrigation.mp4" value={s.video_url_irrigation||''} onChange={e => set('video_url_irrigation', e.target.value)} />
+          </div>
+          <div className="form-group" style={{ marginBottom:12 }}>
+            <label className="label">Tree Removal video URL</label>
+            <input className="input" placeholder="https://...supabase.co/storage/v1/object/public/videos/tree_removal.mp4" value={s.video_url_tree_removal||''} onChange={e => set('video_url_tree_removal', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label className="label">Booking link (Calendly / cal.com)</label>
+            <input className="input" placeholder="https://cal.com/yourname/15min" value={s.booking_url||''} onChange={e => set('booking_url', e.target.value)} />
+          </div>
+        </div>
         <div className="card" style={{ marginBottom:16 }}>
           <div style={{ fontWeight:600, marginBottom:4 }}>🔗 Webhook URL</div>
           <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:12 }}>
