@@ -11,8 +11,22 @@ export default function LinksPage() {
   const [error, setError] = useState('');
   const [copiedSlug, setCopiedSlug] = useState('');
 
+  // Landing page video URLs + booking link — moved here from Settings
+  const [s, setS] = useState({ video_url_lawn_care:'', video_url_irrigation:'', video_url_tree_removal:'', booking_url:'' });
+  const [mediaSaved, setMediaSaved] = useState(false);
+  const [mediaSaving, setMediaSaving] = useState(false);
+  const set = (k, v) => setS(p => ({ ...p, [k]: v }));
+  const saveMedia = async () => {
+    setMediaSaving(true);
+    try { await api.updateSettings(s); setMediaSaved(true); setTimeout(() => setMediaSaved(false), 3000); }
+    finally { setMediaSaving(false); }
+  };
+
   const load = () => api.getLinks().then(l => setLinks(l || [])).finally(() => setLoading(false));
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    api.getSettings().then(d => { if (d) setS(p => ({ ...p, ...d })); }).catch(() => {});
+  }, []);
 
   const resetForm = () => { setAdding(false); setEditingId(null); setName(''); setUrl(''); setError(''); };
 
@@ -49,6 +63,34 @@ export default function LinksPage() {
       </div>
 
       <div className="page fade-in" style={{ maxWidth: 700 }}>
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <div style={{ fontWeight: 600 }}>🎥 Landing Page Media</div>
+            <button onClick={saveMedia} disabled={mediaSaving} className="btn btn-primary btn-sm">
+              {mediaSaved ? '✓ Saved!' : mediaSaving ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+            One video per niche — shared across every lead in that niche. Paste the Supabase Storage public URL for each once uploaded.
+          </div>
+          <div className="form-group" style={{ marginBottom: 12 }}>
+            <label className="label">Lawn Care video URL</label>
+            <input className="input" placeholder="https://...supabase.co/storage/v1/object/public/videos/lawn_care.mp4" value={s.video_url_lawn_care || ''} onChange={e => set('video_url_lawn_care', e.target.value)} />
+          </div>
+          <div className="form-group" style={{ marginBottom: 12 }}>
+            <label className="label">Irrigation video URL</label>
+            <input className="input" placeholder="https://...supabase.co/storage/v1/object/public/videos/irrigation.mp4" value={s.video_url_irrigation || ''} onChange={e => set('video_url_irrigation', e.target.value)} />
+          </div>
+          <div className="form-group" style={{ marginBottom: 12 }}>
+            <label className="label">Tree Removal video URL</label>
+            <input className="input" placeholder="https://...supabase.co/storage/v1/object/public/videos/tree_removal.mp4" value={s.video_url_tree_removal || ''} onChange={e => set('video_url_tree_removal', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label className="label">Booking link (Calendly / cal.com)</label>
+            <input className="input" placeholder="https://cal.com/yourname/15min" value={s.booking_url || ''} onChange={e => set('booking_url', e.target.value)} />
+          </div>
+        </div>
+
         {(adding || editingId) && (
           <div className="card" style={{ marginBottom: 16, borderColor: 'var(--accent)' }}>
             <div style={{ fontWeight: 600, marginBottom: 12 }}>{editingId ? 'Edit Link' : 'Add Link'}</div>
