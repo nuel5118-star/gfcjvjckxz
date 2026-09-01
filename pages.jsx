@@ -228,21 +228,48 @@ export function AnalyticsPage() {
 }
 export function InboxesPage() {
   const [inboxes, setInboxes] = useState([]);
+  const [niches, setNiches] = useState([]);
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ email:'', label:'', daily_cap:100 });
+  const [form, setForm] = useState({ email:'', label:'', daily_cap:100, allowed_niches:[] });
   const [error, setError] = useState('');
   const [editId, setEditId] = useState(null);
   const [editForm, setEditForm] = useState({});
 
   const load = () => api.getInboxes().then(setInboxes);
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); api.getNiches().then(setNiches).catch(()=>{}); }, []);
 
   const handleAdd = async () => {
     if (!form.email.trim()) { setError('Email is required'); return; }
     setError('');
-    try { await api.createInbox(form); setForm({ email:'', label:'', daily_cap:100 }); setAdding(false); load(); }
+    try { await api.createInbox(form); setForm({ email:'', label:'', daily_cap:100, allowed_niches:[] }); setAdding(false); load(); }
     catch(e) { setError(e.message); }
   };
+
+  const toggleNiche = (list, niche) =>
+    list.includes(niche) ? list.filter(n => n !== niche) : [...list, niche];
+
+  // "All niches" chip is shown as selected when nothing is restricted
+  // (allowed_niches empty/null), matching the backend's own fallback
+  // behavior for unrestricted inboxes.
+  const NicheChips = ({ selected, onChange }) => (
+    <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+      <button
+        type="button"
+        onClick={() => onChange([])}
+        className="btn btn-sm"
+        style={{ background: selected.length===0 ? 'var(--accent)' : 'var(--bg-secondary)', color: selected.length===0 ? '#fff' : 'var(--text)' }}
+      >All niches</button>
+      {niches.map(n => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => onChange(toggleNiche(selected, n))}
+          className="btn btn-sm"
+          style={{ background: selected.includes(n) ? 'var(--accent)' : 'var(--bg-secondary)', color: selected.includes(n) ? '#fff' : 'var(--text)' }}
+        >{n}</button>
+      ))}
+    </div>
+  );
 
   const totalCap = inboxes.filter(i => i.active).reduce((s, i) => s + (i.daily_cap || 100), 0);
 
@@ -261,8 +288,12 @@ export function InboxesPage() {
               <div className="form-group"><label className="label">Label (optional)</label><input className="input" placeholder="e.g. Main inbox" value={form.label} onChange={e => setForm(f => ({ ...f, label:e.target.value }))} /></div>
               <div className="form-group"><label className="label">Daily cap</label><input type="number" className="input" value={form.daily_cap} onChange={e => setForm(f => ({ ...f, daily_cap:parseInt(e.target.value)||100 }))} /></div>
             </div>
+            <div className="form-group" style={{ marginTop:10 }}>
+              <label className="label">Restrict to niches (optional — leave on "All niches" to allow any)</label>
+              <NicheChips selected={form.allowed_niches} onChange={(list) => setForm(f => ({ ...f, allowed_niches:list }))} />
+            </div>
             {error && <div className="alert alert-error">{error}</div>}
-            <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+            <div style={{ display:'flex', gap:8, justifyContent:'flex-end', marginTop:10 }}>
               <button onClick={() => { setAdding(false); setError(''); }} className="btn btn-secondary">Cancel</button>
               <button onClick={handleAdd} className="btn btn-primary">Add Inbox</button>
             </div>
@@ -273,16 +304,24 @@ export function InboxesPage() {
         ) : (
           <div className="card" style={{ padding:0, overflow:'hidden' }}>
             {inboxes.map((inbox, i) => (
-              <div key={inbox.id} style={{ padding:'14px 20px', borderBottom:i<inboxes.length-1?'1px solid var(--border)':'none', display:'flex', alignItems:'center', justifyContent:'space-between', opacity:inbox.active?1:0.5 }}>
+              <div key={inbox.id} style={{ padding:'14px 20px', borderBottom:i<inboxes.length-1?'1px solid var(--border)':'none', opacity:inbox.active?1:0.5 }}>
                 {editId === inbox.id ? (
-                  <div style={{ display:'flex', gap:8, flex:1, alignItems:'center' }}>
-                    <input className="input" style={{ flex:1 }} value={editForm.label||''} onChange={e => setEditForm(f => ({ ...f, label:e.target.value }))} placeholder="Label" />
-                    <input type="number" className="input" style={{ width:80 }} value={editForm.daily_cap||100} onChange={e => setEditForm(f => ({ ...f, daily_cap:parseInt(e.target.value)||100 }))} />
-                    <button onClick={async () => { await api.updateInbox(inbox.id, editForm); setEditId(null); load(); }} className="btn btn-primary btn-sm">Save</button>
-                    <button onClick={() => setEditId(null)} className="btn btn-secondary btn-sm">Cancel</button>
+                  <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                    <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                      <input className="input" style={{ flex:1 }} value={editForm.label||''} onChange={e => setEditForm(f => ({ ...f, label:e.target.value }))} placeholder="Label" />
+                      <input type="number" className="input" style={{ width:80 }} value={editForm.daily_cap||100} onChange={e => setEditForm(f => ({ ...f, daily_cap:parseInt(e.target.value)||100 }))} />
+                    </div>
+                    <div>
+                      <label className="label" style={{ marginBottom:4, display:'block' }}>Restrict to niches</label>
+                      <NicheChips selected={editForm.allowed_niches||[]} onChange={(list) => setEditForm(f => ({ ...f, allowed_niches:list }))} />
+                    </div>
+                    <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+                      <button onClick={async () => { await api.updateInbox(inbox.id, editForm); setEditId(null); load(); }} className="btn btn-primary btn-sm">Save</button>
+                      <button onClick={() => setEditId(null)} className="btn btn-secondary btn-sm">Cancel</button>
+                    </div>
                   </div>
                 ) : (
-                  <>
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
                     <div style={{ display:'flex', alignItems:'center', gap:12 }}>
                       <div style={{ width:8, height:8, borderRadius:'50%', background:inbox.active?'var(--success)':'var(--text-muted)' }} />
                       <div>
@@ -290,15 +329,16 @@ export function InboxesPage() {
                         <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>
                           {inbox.label && <span style={{ marginRight:8 }}>{inbox.label} ·</span>}
                           {inbox.daily_cap} emails/day cap
+                          {inbox.allowed_niches?.length ? <span style={{ marginLeft:8 }}>· niches: {inbox.allowed_niches.join(', ')}</span> : <span style={{ marginLeft:8 }}>· all niches</span>}
                         </div>
                       </div>
                     </div>
                     <div style={{ display:'flex', gap:6 }}>
                       <button onClick={async () => { await api.updateInbox(inbox.id, { active:!inbox.active }); load(); }} className="btn btn-secondary btn-sm">{inbox.active ? 'Disable' : 'Enable'}</button>
-                      <button onClick={() => { setEditId(inbox.id); setEditForm({ label:inbox.label||'', daily_cap:inbox.daily_cap||100 }); }} className="btn btn-secondary btn-sm">Edit</button>
+                      <button onClick={() => { setEditId(inbox.id); setEditForm({ label:inbox.label||'', daily_cap:inbox.daily_cap||100, allowed_niches:inbox.allowed_niches||[] }); }} className="btn btn-secondary btn-sm">Edit</button>
                       <button onClick={async () => { if (!confirm('Delete?')) return; await api.deleteInbox(inbox.id); load(); }} className="btn btn-danger btn-sm">Delete</button>
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             ))}
