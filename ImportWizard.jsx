@@ -13,6 +13,7 @@ const SYSTEM_FIELDS = [
   { value: 'timezone', label: 'Timezone (e.g. America/New_York)' },
   { value: 'niche', label: 'Niche (lawn_care / irrigation / tree_removal)' },
   { value: 'screenshot_url', label: 'Website Screenshot URL' },
+  { value: 'gif_url', label: 'Personalized GIF URL' },
   { value: 'custom', label: 'Keep as custom variable {{column_name}}' },
   { value: 'skip', label: "Don't import this column" },
 ];
