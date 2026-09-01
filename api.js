@@ -52,6 +52,7 @@ export const api = {
   createInbox: (data) => req('POST', '/inboxes', data),
   updateInbox: (id, data) => req('PUT', `/inboxes/${id}`, data),
   deleteInbox: (id) => req('DELETE', `/inboxes/${id}`),
+  getNiches: () => req('GET', '/niches'),
   getSettings: () => req('GET', '/settings'),
   updateSettings: (data) => req('PUT', '/settings', data),
   getAnalytics: (params={}) => { const qs = new URLSearchParams(params).toString(); return req('GET', `/analytics?${qs}`); },
