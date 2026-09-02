@@ -169,6 +169,15 @@ body {
 }
 @media (min-width: 1180px) {
   .campaign-builder-page {
+    /* FIX: the page's inline maxWidth:780 combined with this padding-right
+       left only ~452px of ACTUAL usable width for the Email Body textarea
+       (780 - 328), regardless of monitor size, while the library panel sat
+       pinned way over on the right edge of the viewport -- that gap between
+       the two was the "huge dead space" doing nothing. max-width here
+       (with !important, since it needs to beat the inline style) gives the
+       editor column real room to breathe on wide screens, so line breaks
+       in a GIF/short-image email are actually visible while you're writing. */
+    max-width: 1500px !important;
     padding-right: 328px !important;
   }
   .seq-library-panel {
